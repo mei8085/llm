@@ -38,6 +38,16 @@ from .models import (
     ToolResult,
     Usage,
 )
+try:
+    from .default_plugins.provider_adapters import (
+        AnthropicProviderAdapter,
+        BaseProviderAdapter,
+        GeminiProviderAdapter,
+    )
+except ImportError:
+    AnthropicProviderAdapter = None
+    BaseProviderAdapter = None
+    GeminiProviderAdapter = None
 from .parts import (
     Message,
     assistant,
@@ -58,6 +68,7 @@ import pathlib
 import struct
 
 __all__ = [
+    "AnthropicProviderAdapter",
     "AsyncConversation",
     "AsyncKeyModel",
     "AsyncModel",
@@ -65,10 +76,12 @@ __all__ = [
     "AsyncResponse",
     "assistant",
     "Attachment",
+    "BaseProviderAdapter",
     "CancelToolCall",
     "Collection",
     "Conversation",
     "Fragment",
+    "GeminiProviderAdapter",
     "get_async_model",
     "get_key",
     "get_model",

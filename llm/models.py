@@ -3241,10 +3241,22 @@ class ProviderErrorNormalizer:
         """归一化 OpenAI 错误
 
         将 OpenAI SDK 抛出的各种异常转换为标准的 llm 错误类型。
+
+        注意：检查顺序很重要，必须从最具体到最一般，
+        因为 APITimeoutError 继承自 APIConnectionError，
+        而 APIConnectionError 继承自 APIError。
         """
         import openai
 
-        if isinstance(exception, openai.AuthenticationError):
+        if isinstance(exception, openai.APITimeoutError):
+            from .errors import ProviderTimeoutError
+
+            return ProviderTimeoutError(str(exception))
+        elif isinstance(exception, openai.APIConnectionError):
+            from .errors import ProviderConnectionError
+
+            return ProviderConnectionError(str(exception))
+        elif isinstance(exception, openai.AuthenticationError):
             from .errors import ProviderAuthenticationError
 
             return ProviderAuthenticationError(
@@ -3268,14 +3280,6 @@ class ProviderErrorNormalizer:
                 status_code=getattr(exception, "status_code", None),
                 response=getattr(exception, "response", None),
             )
-        elif isinstance(exception, openai.APIConnectionError):
-            from .errors import ProviderConnectionError
-
-            return ProviderConnectionError(str(exception))
-        elif isinstance(exception, openai.APITimeoutError):
-            from .errors import ProviderTimeoutError
-
-            return ProviderTimeoutError(str(exception))
         return exception
 
     @staticmethod
