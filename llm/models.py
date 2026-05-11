@@ -637,7 +637,7 @@ class _BaseConversation:
         summary_model = self._get_summary_model()
         summary_text = self._generate_summary(summary_model, other_messages)
         original_tokens = self._calculate_total_tokens()
-        summary_model_id = self.compress_model_id or self.model.model_id
+        summary_model_id = getattr(summary_model, 'model_id', None) or self.model.model_id
 
         compressed_messages = self._build_compressed_chain(
             system_message, summary_text, new_user_message

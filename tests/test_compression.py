@@ -285,6 +285,7 @@ class TestCompressHistory:
         conversation.responses = [mock_response]
         
         mock_summary_model = MagicMock()
+        mock_summary_model.model_id = "custom-summary-model"
         mock_summary_response = MagicMock()
         mock_summary_response.text.return_value = "User said hello, assistant replied"
         mock_summary_model.prompt.return_value = mock_summary_response
@@ -298,8 +299,42 @@ class TestCompressHistory:
             assert "summary_text" in result
             assert result["summary_text"] == "User said hello, assistant replied"
             assert "summary_model_id" in result
+            assert result["summary_model_id"] == "custom-summary-model"
             assert "compressed_messages" in result
             assert len(result["compressed_messages"]) >= 2
+
+    def test_compress_history_fallback_model_id(self, mock_model):
+        """Test that summary_model_id records actual fallback model, not user-specified one."""
+        conversation = llm.Conversation(model=mock_model)
+        mock_model.model_id = "actual-current-model"
+        conversation.compress_enabled = True
+        conversation.compress_threshold = 10
+        conversation.compress_model_id = "user-specified-but-missing-model"
+        
+        mock_prompt = MagicMock()
+        mock_prompt.messages = [
+            Message(role="user", parts=[TextPart(text="Hello")]),
+            Message(role="assistant", parts=[TextPart(text="Hi there!")]),
+        ]
+        
+        mock_response = MagicMock()
+        mock_response.input_tokens = 100
+        mock_response.output_tokens = 100
+        mock_response.prompt = mock_prompt
+        mock_response._messages_now.return_value = []
+        conversation.responses = [mock_response]
+        
+        mock_fallback_response = MagicMock()
+        mock_fallback_response.text.return_value = "Fallback summary"
+        
+        with patch('llm.get_model', side_effect=ValueError("Model not found")):
+            with patch.object(mock_model, 'prompt', return_value=mock_fallback_response):
+                result = conversation._compress_history("What's next?")
+                
+                assert result is not None
+                assert "summary_model_id" in result
+                assert result["summary_model_id"] == "actual-current-model"
+                assert result["summary_model_id"] != "user-specified-but-missing-model"
 
 
 class TestCompressionLogging:
