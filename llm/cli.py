@@ -1572,6 +1572,12 @@ order by prompt_attachments."order"
     is_flag=True,
     help="Filter for prompts with results from any tools",
 )
+@click.option(
+    "tool_failures",
+    "--tool-failures",
+    is_flag=True,
+    help="Filter for prompts with failed tool calls",
+)
 @schema_option
 @click.option(
     "--schema-multi",
@@ -1639,6 +1645,7 @@ def logs_list(
     fragments,
     tools,
     any_tools,
+    tool_failures,
     schema_input,
     schema_multi,
     latest,
@@ -1785,6 +1792,17 @@ def logs_list(
                 from tool_results
               where
                 tool_results.response_id = responses.id
+            )
+        """)
+    if tool_failures:
+        # Responses with failed tool calls (exception is not null)
+        where_bits.append("""
+            exists (
+              select 1
+                from tool_results
+               where tool_results.response_id = responses.id
+                 and tool_results.exception is not null
+                 and tool_results.exception != ''
             )
         """)
     if tools:
@@ -1938,6 +1956,20 @@ def logs_list(
             'output', tr.output,
             'tool_call_id', tr.tool_call_id,
             'exception', tr.exception,
+            'retry_count', tr.retry_count,
+            'tool_traces', COALESCE(
+                (SELECT json_group_array(json_object(
+                    'id', tt.id,
+                    'arguments', json(tt.arguments),
+                    'error', tt.error,
+                    'retry_number', tt.retry_number,
+                    'timestamp_utc', tt.timestamp_utc
+                ))
+                FROM tool_traces tt
+                WHERE tt.tool_result_id = tr.id
+                ),
+                '[]'
+            ),
             'attachments', COALESCE(
                 (SELECT json_group_array(json_object(
                     'id', a.id,

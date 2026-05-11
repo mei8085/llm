@@ -321,6 +321,8 @@ class ToolResult:
     tool_call_id: Optional[str] = None
     instance: Optional[Toolbox] = None
     exception: Optional[Exception] = None
+    retry_count: int = 0
+    tool_traces: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1479,10 +1481,23 @@ class _BaseResponse:
                             if tool_result.exception
                             else None
                         ),
+                        "retry_count": getattr(tool_result, "retry_count", 0),
                     }
                 )
                 .last_pk
             )
+            # Persist tool traces
+            tool_traces = getattr(tool_result, "tool_traces", [])
+            for trace in tool_traces:
+                db["tool_traces"].insert(
+                    {
+                        "tool_result_id": tool_result_id,
+                        "arguments": json.dumps(trace.get("arguments", {})),
+                        "error": trace.get("error", ""),
+                        "retry_number": trace.get("retry_number", 0),
+                        "timestamp_utc": trace.get("timestamp_utc", ""),
+                    }
+                )
             # Persist attachments for tool results
             for index, attachment in enumerate(tool_result.attachments):
                 attachment_id = attachment.id()
@@ -1742,6 +1757,9 @@ class Response(_BaseResponse):
 
         for tool_call in self.tool_calls():
             tool: Optional[Tool] = tools_by_name.get(tool_call.name)
+            tool_traces: List[Dict[str, Any]] = []
+            retry_count = 0
+
             # Tool could be None if the tool was not found in the prompt tools,
             # but we still call the before_call method:
             if before_call:
@@ -1753,24 +1771,50 @@ class Response(_BaseResponse):
                             "Please use an async chain/response or a synchronous callback."
                         )
                 except CancelToolCall as ex:
+                    tool_traces.append(
+                        {
+                            "arguments": tool_call.arguments,
+                            "error": "Cancelled: " + str(ex),
+                            "error_type": ex.__class__.__name__,
+                            "retry_number": 0,
+                            "timestamp_utc": datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).isoformat(),
+                        }
+                    )
                     tool_results.append(
                         ToolResult(
                             name=tool_call.name,
                             output="Cancelled: " + str(ex),
                             tool_call_id=tool_call.tool_call_id,
                             exception=ex,
+                            retry_count=retry_count,
+                            tool_traces=tool_traces,
                         )
                     )
                     continue
 
             if tool is None:
                 msg = 'tool "{}" does not exist'.format(tool_call.name)
+                tool_traces.append(
+                    {
+                        "arguments": tool_call.arguments,
+                        "error": msg,
+                        "error_type": "KeyError",
+                        "retry_number": 0,
+                        "timestamp_utc": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                    }
+                )
                 tool_results.append(
                     ToolResult(
                         name=tool_call.name,
                         output="Error: " + msg,
                         tool_call_id=tool_call.tool_call_id,
                         exception=KeyError(msg),
+                        retry_count=retry_count,
+                        tool_traces=tool_traces,
                     )
                 )
                 continue
@@ -1782,22 +1826,53 @@ class Response(_BaseResponse):
 
             attachments = []
             exception = None
+            result = None
+            retry_number = 0
 
-            try:
-                if inspect.iscoroutinefunction(tool.implementation):
-                    result = asyncio.run(tool.implementation(**tool_call.arguments))
-                else:
-                    result = tool.implementation(**tool_call.arguments)
+            # Check for retry decorator or retry config
+            max_retries = getattr(tool, "max_retries", 0)
+            retry_delay = getattr(tool, "retry_delay", 0)
 
-                if isinstance(result, ToolOutput):
-                    attachments = result.attachments
-                    result = result.output
+            while retry_number <= max_retries:
+                attachments = []
+                exception = None
 
-                if not isinstance(result, str):
-                    result = json.dumps(result, default=repr)
-            except Exception as ex:
-                result = f"Error: {ex}"
-                exception = ex
+                try:
+                    if inspect.iscoroutinefunction(tool.implementation):
+                        result = asyncio.run(tool.implementation(**tool_call.arguments))
+                    else:
+                        result = tool.implementation(**tool_call.arguments)
+
+                    if isinstance(result, ToolOutput):
+                        attachments = result.attachments
+                        result = result.output
+
+                    if not isinstance(result, str):
+                        result = json.dumps(result, default=repr)
+                    break
+                except Exception as ex:
+                    exception = ex
+                    error_str = "{}: {}".format(ex.__class__.__name__, str(ex))
+                    tool_traces.append(
+                        {
+                            "arguments": tool_call.arguments,
+                            "error": error_str,
+                            "error_type": ex.__class__.__name__,
+                            "retry_number": retry_number,
+                            "timestamp_utc": datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).isoformat(),
+                        }
+                    )
+
+                    if retry_number < max_retries:
+                        retry_number += 1
+                        retry_count = retry_number
+                        if retry_delay > 0:
+                            time.sleep(retry_delay)
+                    else:
+                        result = f"Error: {ex}"
+                        break
 
             tool_result_obj = ToolResult(
                 name=tool_call.name,
@@ -1806,6 +1881,8 @@ class Response(_BaseResponse):
                 tool_call_id=tool_call.tool_call_id,
                 instance=_get_instance(tool.implementation),
                 exception=exception,
+                retry_count=retry_count,
+                tool_traces=tool_traces,
             )
 
             if after_call:
@@ -2068,17 +2145,64 @@ class AsyncResponse(_BaseResponse):
 
         for idx, tc in enumerate(tool_calls_list):
             tool: Optional[Tool] = tools_by_name.get(tc.name)
-            exception: Optional[Exception] = None
 
             if tool is None:
-                output = f'Error: tool "{tc.name}" does not exist'
-                exception = KeyError(tc.name)
+                tool_traces: List[Dict[str, Any]] = [
+                    {
+                        "arguments": tc.arguments,
+                        "error": f'tool "{tc.name}" does not exist',
+                        "error_type": "KeyError",
+                        "retry_number": 0,
+                        "timestamp_utc": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                    }
+                ]
+                indexed_results.append(
+                    (
+                        idx,
+                        ToolResult(
+                            name=tc.name,
+                            output=f'Error: tool "{tc.name}" does not exist',
+                            tool_call_id=tc.tool_call_id,
+                            exception=KeyError(tc.name),
+                            retry_count=0,
+                            tool_traces=tool_traces,
+                        ),
+                    )
+                )
+                continue
             elif not tool.implementation:
-                output = f'Error: tool "{tc.name}" has no implementation'
-                exception = KeyError(tc.name)
+                tool_traces = [
+                    {
+                        "arguments": tc.arguments,
+                        "error": f'tool "{tc.name}" has no implementation',
+                        "error_type": "KeyError",
+                        "retry_number": 0,
+                        "timestamp_utc": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                    }
+                ]
+                indexed_results.append(
+                    (
+                        idx,
+                        ToolResult(
+                            name=tc.name,
+                            output=f'Error: tool "{tc.name}" has no implementation',
+                            tool_call_id=tc.tool_call_id,
+                            exception=KeyError(tc.name),
+                            retry_count=0,
+                            tool_traces=tool_traces,
+                        ),
+                    )
+                )
+                continue
             elif inspect.iscoroutinefunction(tool.implementation):
 
                 async def run_async(tc=tc, tool=tool, idx=idx):
+                    tool_traces: List[Dict[str, Any]] = []
+                    retry_count = 0
                     # before_call inside the task
                     if before_call:
                         try:
@@ -2086,37 +2210,79 @@ class AsyncResponse(_BaseResponse):
                             if inspect.isawaitable(cb):
                                 await cb
                         except CancelToolCall as ex:
+                            tool_traces.append(
+                                {
+                                    "arguments": tc.arguments,
+                                    "error": "Cancelled: " + str(ex),
+                                    "error_type": ex.__class__.__name__,
+                                    "retry_number": 0,
+                                    "timestamp_utc": datetime.datetime.now(
+                                        datetime.timezone.utc
+                                    ).isoformat(),
+                                }
+                            )
                             return idx, ToolResult(
                                 name=tc.name,
                                 output="Cancelled: " + str(ex),
                                 tool_call_id=tc.tool_call_id,
                                 exception=ex,
+                                retry_count=retry_count,
+                                tool_traces=tool_traces,
                             )
 
                     exception = None
                     attachments = []
+                    result = None
+                    retry_number = 0
+                    max_retries = getattr(tool, "max_retries", 0)
+                    retry_delay = getattr(tool, "retry_delay", 0)
 
-                    try:
-                        result = await tool.implementation(**tc.arguments)
-                        if isinstance(result, ToolOutput):
-                            attachments.extend(result.attachments)
-                            result = result.output
-                        output = (
-                            result
-                            if isinstance(result, str)
-                            else json.dumps(result, default=repr)
-                        )
-                    except Exception as ex:
-                        output = f"Error: {ex}"
-                        exception = ex
+                    while retry_number <= max_retries:
+                        exception = None
+                        attachments = []
+                        try:
+                            res = await tool.implementation(**tc.arguments)
+                            if isinstance(res, ToolOutput):
+                                attachments.extend(res.attachments)
+                                res = res.output
+                            result = (
+                                res
+                                if isinstance(res, str)
+                                else json.dumps(res, default=repr)
+                            )
+                            break
+                        except Exception as ex:
+                            exception = ex
+                            error_str = "{}: {}".format(ex.__class__.__name__, str(ex))
+                            tool_traces.append(
+                                {
+                                    "arguments": tc.arguments,
+                                    "error": error_str,
+                                    "error_type": ex.__class__.__name__,
+                                    "retry_number": retry_number,
+                                    "timestamp_utc": datetime.datetime.now(
+                                        datetime.timezone.utc
+                                    ).isoformat(),
+                                }
+                            )
+                            if retry_number < max_retries:
+                                retry_number += 1
+                                retry_count = retry_number
+                                if retry_delay > 0:
+                                    await asyncio.sleep(retry_delay)
+                            else:
+                                result = f"Error: {ex}"
+                                break
 
                     tr = ToolResult(
                         name=tc.name,
-                        output=output,
+                        output=result,
                         attachments=attachments,
                         tool_call_id=tc.tool_call_id,
                         instance=_get_instance(tool.implementation),
                         exception=exception,
+                        retry_count=retry_count,
+                        tool_traces=tool_traces,
                     )
 
                     # after_call inside the task
@@ -2131,12 +2297,26 @@ class AsyncResponse(_BaseResponse):
 
             else:
                 # Sync implementation: do hooks and call inline
+                tool_traces: List[Dict[str, Any]] = []
+                retry_count = 0
+
                 if before_call:
                     try:
                         cb = before_call(tool, tc)
                         if inspect.isawaitable(cb):
                             await cb
                     except CancelToolCall as ex:
+                        tool_traces.append(
+                            {
+                                "arguments": tc.arguments,
+                                "error": "Cancelled: " + str(ex),
+                                "error_type": ex.__class__.__name__,
+                                "retry_number": 0,
+                                "timestamp_utc": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ).isoformat(),
+                            }
+                        )
                         indexed_results.append(
                             (
                                 idx,
@@ -2145,6 +2325,8 @@ class AsyncResponse(_BaseResponse):
                                     output="Cancelled: " + str(ex),
                                     tool_call_id=tc.tool_call_id,
                                     exception=ex,
+                                    retry_count=retry_count,
+                                    tool_traces=tool_traces,
                                 ),
                             )
                         )
@@ -2152,11 +2334,14 @@ class AsyncResponse(_BaseResponse):
 
                 exception = None
                 attachments = []
+                result = None
+                retry_number = 0
+                max_retries = getattr(tool, "max_retries", 0)
+                retry_delay = getattr(tool, "retry_delay", 0)
 
-                if tool is None:
-                    output = f'Error: tool "{tc.name}" does not exist'
-                    exception = KeyError(tc.name)
-                else:
+                while retry_number <= max_retries:
+                    exception = None
+                    attachments = []
                     try:
                         res = tool.implementation(**tc.arguments)
                         if inspect.isawaitable(res):
@@ -2164,30 +2349,52 @@ class AsyncResponse(_BaseResponse):
                         if isinstance(res, ToolOutput):
                             attachments.extend(res.attachments)
                             res = res.output
-                        output = (
+                        result = (
                             res
                             if isinstance(res, str)
                             else json.dumps(res, default=repr)
                         )
+                        break
                     except Exception as ex:
-                        output = f"Error: {ex}"
                         exception = ex
+                        error_str = "{}: {}".format(ex.__class__.__name__, str(ex))
+                        tool_traces.append(
+                            {
+                                "arguments": tc.arguments,
+                                "error": error_str,
+                                "error_type": ex.__class__.__name__,
+                                "retry_number": retry_number,
+                                "timestamp_utc": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ).isoformat(),
+                            }
+                        )
+                        if retry_number < max_retries:
+                            retry_number += 1
+                            retry_count = retry_number
+                            if retry_delay > 0:
+                                await asyncio.sleep(retry_delay)
+                        else:
+                            result = f"Error: {ex}"
+                            break
 
-                    tr = ToolResult(
-                        name=tc.name,
-                        output=output,
-                        attachments=attachments,
-                        tool_call_id=tc.tool_call_id,
-                        instance=_get_instance(tool.implementation),
-                        exception=exception,
-                    )
+                tr = ToolResult(
+                    name=tc.name,
+                    output=result,
+                    attachments=attachments,
+                    tool_call_id=tc.tool_call_id,
+                    instance=_get_instance(tool.implementation),
+                    exception=exception,
+                    retry_count=retry_count,
+                    tool_traces=tool_traces,
+                )
 
-                    if tool is not None and after_call:
-                        cb2 = after_call(tool, tc, tr)
-                        if inspect.isawaitable(cb2):
-                            await cb2
+                if tool is not None and after_call:
+                    cb2 = after_call(tool, tc, tr)
+                    if inspect.isawaitable(cb2):
+                        await cb2
 
-                    indexed_results.append((idx, tr))
+                indexed_results.append((idx, tr))
 
         # Await all async tasks in parallel
         if async_tasks:

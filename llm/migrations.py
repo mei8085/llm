@@ -426,3 +426,22 @@ def m022_response_reasoning(db):
     # NULL/empty when no reasoning was emitted or when the provider
     # only reported an opaque token count (the redacted-marker case).
     db["responses"].add_column("reasoning", str)
+
+
+@migration
+def m023_tool_results_retry_and_trace(db):
+    # Add retry_count column to tool_results
+    db["tool_results"].add_column("retry_count", int, default=0)
+    # Create tool_traces table for storing detailed tool call traces
+    db["tool_traces"].create(
+        {
+            "id": int,
+            "tool_result_id": int,
+            "arguments": str,
+            "error": str,
+            "retry_number": int,
+            "timestamp_utc": str,
+        },
+        pk="id",
+        foreign_keys=(("tool_result_id", "tool_results", "id"),),
+    )

@@ -1078,3 +1078,126 @@ def test_logs_markdown_omits_reasoning_heading_when_empty(log_path):
     result = runner.invoke(cli, ["logs", "-p", str(log_path)], catch_exceptions=False)
     assert result.exit_code == 0
     assert "## Reasoning" not in result.output
+
+
+ERROR_FUNCTION = """
+def trigger_error(msg: str):
+    raise Exception(msg)
+"""
+
+
+def test_logs_tool_failures_filter(logs_db):
+    """Test the --tool-failures filter option."""
+    runner = CliRunner()
+    # Log a tool call that succeeds
+    success_code = textwrap.dedent("""
+    def demo():
+        return "success"
+    """)
+    result1 = runner.invoke(
+        cli,
+        [
+            "-m",
+            "echo",
+            "--functions",
+            success_code,
+            json.dumps({"tool_calls": [{"name": "demo"}]}),
+        ],
+        catch_exceptions=False,
+    )
+    assert result1.exit_code == 0
+    # Log a tool call that fails
+    result2 = runner.invoke(
+        cli,
+        [
+            "-m",
+            "echo",
+            "--functions",
+            ERROR_FUNCTION,
+            json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "trigger_error", "arguments": {"msg": "TestError!"}}
+                    ]
+                }
+            ),
+        ],
+        catch_exceptions=False,
+    )
+    assert result2.exit_code == 0
+    # Now check that --tool-failures only shows failed ones
+    all_logs = runner.invoke(cli, ["logs", "--json"], catch_exceptions=False)
+    assert all_logs.exit_code == 0
+    all_data = json.loads(all_logs.output.strip())
+    # Should have 2 responses for success + 2 for failure = 4 total,
+    # but let's check the count
+    assert len(all_data) >= 4
+
+    # Now filter with --tool-failures
+    failures_logs = runner.invoke(
+        cli, ["logs", "--tool-failures", "--json"], catch_exceptions=False
+    )
+    assert failures_logs.exit_code == 0
+    failures_data = json.loads(failures_logs.output.strip())
+
+    # Should only have responses with tool failures
+    for response in failures_data:
+        tool_results = response.get("tool_results", [])
+        has_failure = any(
+            tr.get("exception") and tr.get("exception") != "" for tr in tool_results
+        )
+        assert has_failure, f"Response without failure in --tool-failures: {response}"
+
+
+def test_logs_tool_traces_and_retry_count(logs_db):
+    """Test that tool_traces and retry_count are stored and retrieved."""
+    runner = CliRunner()
+    # Log a tool call that fails
+    result = runner.invoke(
+        cli,
+        [
+            "-m",
+            "echo",
+            "--functions",
+            ERROR_FUNCTION,
+            json.dumps(
+                {
+                    "tool_calls": [
+                        {"name": "trigger_error", "arguments": {"msg": "TraceTest"}}
+                    ]
+                }
+            ),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # Check the logs for traces and retry_count
+    logs = runner.invoke(cli, ["logs", "-c", "--json"], catch_exceptions=False)
+    assert logs.exit_code == 0
+    data = json.loads(logs.output.strip())
+
+    # Find the response with tool_results
+    tool_result_found = False
+    for response in data:
+        tool_results = response.get("tool_results", [])
+        for tr in tool_results:
+            if tr.get("exception") and "TraceTest" in tr.get("exception", ""):
+                tool_result_found = True
+                # Check retry_count is present
+                assert "retry_count" in tr, f"retry_count not found: {tr}"
+                # Check tool_traces is present
+                assert "tool_traces" in tr, f"tool_traces not found: {tr}"
+                traces = tr.get("tool_traces", [])
+                assert len(traces) >= 1, f"No traces found: {tr}"
+                trace = traces[0]
+                # Check trace has expected fields
+                assert "arguments" in trace, f"arguments not in trace: {trace}"
+                assert "error" in trace, f"error not in trace: {trace}"
+                assert "retry_number" in trace, f"retry_number not in trace: {trace}"
+                # Verify error message
+                assert "TraceTest" in trace.get(
+                    "error", ""
+                ), f"Error message mismatch: {trace}"
+
+    assert tool_result_found, "Could not find tool result with expected error"
