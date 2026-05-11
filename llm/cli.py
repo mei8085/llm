@@ -354,7 +354,10 @@ def system_option(fn):
 
 
 def template_option(fn):
-    click.option("-t", "--template", help="Template to use")(fn)
+    """Apply template options in correct order.
+    Click applies decorators bottom-to-top, so we apply param first, then template
+    to get the order: template, param
+    """
     click.option(
         "-p",
         "--param",
@@ -362,23 +365,28 @@ def template_option(fn):
         type=(str, str),
         help="Parameters for template",
     )(fn)
+    click.option("-t", "--template", help="Template to use")(fn)
     return fn
 
 
 def fragments_option(fn):
-    click.option(
-        "fragments",
-        "-f",
-        "--fragment",
-        multiple=True,
-        help="Fragment (alias, URL, hash or file path) to add to the prompt",
-    )(fn)
+    """Apply fragments options in correct order.
+    Click applies decorators bottom-to-top, so we apply system_fragments first, then fragments
+    to get the order: fragments, system_fragments
+    """
     click.option(
         "system_fragments",
         "--sf",
         "--system-fragment",
         multiple=True,
         help="Fragment to add to system prompt",
+    )(fn)
+    click.option(
+        "fragments",
+        "-f",
+        "--fragment",
+        multiple=True,
+        help="Fragment (alias, URL, hash or file path) to add to the prompt",
     )(fn)
     return fn
 
@@ -396,18 +404,25 @@ def options_option(fn):
 
 
 def tools_option(fn):
+    """Apply tools options in correct order.
+    Click applies decorators bottom-to-top, so we apply chain_limit first,
+    then tools_approve, tools_debug, python_tools, and finally tools
+    to get the order: tools, python_tools, tools_debug, tools_approve, chain_limit
+    """
     click.option(
-        "tools",
-        "-T",
-        "--tool",
-        multiple=True,
-        help="Name of a tool to make available to the model",
+        "chain_limit",
+        "--cl",
+        "--chain-limit",
+        type=int,
+        default=5,
+        help="How many chained tool responses to allow, default 5, set 0 for unlimited",
     )(fn)
     click.option(
-        "python_tools",
-        "--functions",
-        help="Python code block or file path defining functions to register as tools",
-        multiple=True,
+        "tools_approve",
+        "--ta",
+        "--tools-approve",
+        is_flag=True,
+        help="Manually approve every tool execution",
     )(fn)
     click.option(
         "tools_debug",
@@ -418,24 +433,32 @@ def tools_option(fn):
         envvar="LLM_TOOLS_DEBUG",
     )(fn)
     click.option(
-        "tools_approve",
-        "--ta",
-        "--tools-approve",
-        is_flag=True,
-        help="Manually approve every tool execution",
+        "python_tools",
+        "--functions",
+        help="Python code block or file path defining functions to register as tools",
+        multiple=True,
     )(fn)
     click.option(
-        "chain_limit",
-        "--cl",
-        "--chain-limit",
-        type=int,
-        default=5,
-        help="How many chained tool responses to allow, default 5, set 0 for unlimited",
+        "tools",
+        "-T",
+        "--tool",
+        multiple=True,
+        help="Name of a tool to make available to the model",
     )(fn)
     return fn
 
 
 def conversation_option(fn):
+    """Apply conversation options in correct order.
+    Click applies decorators bottom-to-top, so we apply conversation_id first, then _continue
+    to get the order: _continue, conversation_id
+    """
+    click.option(
+        "conversation_id",
+        "--cid",
+        "--conversation",
+        help="Continue the conversation with the given ID.",
+    )(fn)
     click.option(
         "_continue",
         "-c",
@@ -443,12 +466,6 @@ def conversation_option(fn):
         is_flag=True,
         flag_value=-1,
         help="Continue the most recent conversation.",
-    )(fn)
-    click.option(
-        "conversation_id",
-        "--cid",
-        "--conversation",
-        help="Continue the conversation with the given ID.",
     )(fn)
     return fn
 
@@ -481,16 +498,43 @@ def key_option(fn):
 
 
 def prompt_shared_options(fn):
-    """Shared options for prompt command in the correct original order."""
-    fn = system_option(fn)
-    fn = model_option(fn)
-    fn = database_option(fn)
+    """Shared options for prompt command in the correct original order.
+    Click applies decorators from bottom to top, so we apply them in reverse order.
+    """
     click.option(
-        "queries",
-        "-q",
-        "--query",
+        "extract_last",
+        "--xl",
+        "--extract-last",
+        is_flag=True,
+        help="Extract last fenced code block",
+    )(fn)
+    click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")(fn)
+    click.option("-u", "--usage", is_flag=True, help="Show token usage")(fn)
+    click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")(fn)
+    click.option("--save", help="Save prompt with this template name")(fn)
+    fn = key_option(fn)
+    fn = conversation_option(fn)
+    fn = no_reasoning_option(fn)
+    click.option("--log", is_flag=True, help="Log prompt and response to the database")(fn)
+    click.option("-n", "--no-log", is_flag=True, help="Don't log to database")(fn)
+    fn = no_stream_option(fn)
+    fn = template_option(fn)
+    fn = fragments_option(fn)
+    click.option(
+        "--schema-multi",
+        help="JSON schema to use for multiple results",
+    )(fn)
+    fn = schema_option(fn)
+    fn = options_option(fn)
+    fn = tools_option(fn)
+    click.option(
+        "attachment_types",
+        "--at",
+        "--attachment-type",
+        type=(str, str),
         multiple=True,
-        help="Use first model matching these strings",
+        callback=attachment_types_callback,
+        help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
     )(fn)
     click.option(
         "attachments",
@@ -501,56 +545,33 @@ def prompt_shared_options(fn):
         help="Attachment path or URL or -",
     )(fn)
     click.option(
-        "attachment_types",
-        "--at",
-        "--attachment-type",
-        type=(str, str),
+        "queries",
+        "-q",
+        "--query",
         multiple=True,
-        callback=attachment_types_callback,
-        help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
+        help="Use first model matching these strings",
     )(fn)
-    fn = tools_option(fn)
-    fn = options_option(fn)
-    fn = schema_option(fn)
-    click.option(
-        "--schema-multi",
-        help="JSON schema to use for multiple results",
-    )(fn)
-    fn = fragments_option(fn)
-    fn = template_option(fn)
-    fn = no_stream_option(fn)
-    click.option("-n", "--no-log", is_flag=True, help="Don't log to database")(fn)
-    click.option("--log", is_flag=True, help="Log prompt and response to the database")(fn)
-    fn = no_reasoning_option(fn)
-    fn = conversation_option(fn)
-    fn = key_option(fn)
-    click.option("--save", help="Save prompt with this template name")(fn)
-    click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")(fn)
-    click.option("-u", "--usage", is_flag=True, help="Show token usage")(fn)
-    click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")(fn)
-    click.option(
-        "extract_last",
-        "--xl",
-        "--extract-last",
-        is_flag=True,
-        help="Extract last fenced code block",
-    )(fn)
+    fn = database_option(fn)
+    fn = model_option(fn)
+    fn = system_option(fn)
     return fn
 
 
 def chat_shared_options(fn):
-    """Shared options for chat command in the correct original order."""
-    fn = system_option(fn)
-    fn = model_option(fn)
-    fn = conversation_option(fn)
-    fn = fragments_option(fn)
-    fn = template_option(fn)
-    fn = options_option(fn)
-    fn = database_option(fn)
-    fn = no_stream_option(fn)
-    fn = no_reasoning_option(fn)
-    fn = key_option(fn)
+    """Shared options for chat command in the correct original order.
+    Click applies decorators from bottom to top, so we apply them in reverse order.
+    """
     fn = tools_option(fn)
+    fn = key_option(fn)
+    fn = no_reasoning_option(fn)
+    fn = no_stream_option(fn)
+    fn = database_option(fn)
+    fn = options_option(fn)
+    fn = template_option(fn)
+    fn = fragments_option(fn)
+    fn = conversation_option(fn)
+    fn = model_option(fn)
+    fn = system_option(fn)
     return fn
 
 
