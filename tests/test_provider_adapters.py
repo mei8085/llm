@@ -370,6 +370,56 @@ class TestGeminiProviderAdapter:
         assert tool_calls[0].name == "get_weather"
         assert tool_calls[0].arguments == {}
 
+    def test_process_streaming_tool_call_with_chunked_args(self):
+        """测试处理分片参数的工具调用（流式）"""
+        adapter = GeminiProviderAdapter(SimpleModel())
+
+        mock_model = MagicMock()
+        prompt = Prompt("test", mock_model)
+        response = Response(prompt, MagicMock(), stream=True)
+
+        def mock_stream():
+            chunk1 = MagicMock()
+            mock_candidate1 = MagicMock()
+            mock_content1 = MagicMock()
+            mock_function_call1 = MagicMock()
+            mock_function_call1.name = "search_web"
+            mock_function_call1.args = {"query": "llm"}
+            mock_part1 = MagicMock(text=None, function_call=mock_function_call1)
+            mock_content1.parts = [mock_part1]
+            mock_candidate1.content = mock_content1
+            mock_candidate1.usage_metadata = None
+            chunk1.candidates = [mock_candidate1]
+            yield chunk1
+
+            chunk2 = MagicMock()
+            mock_candidate2 = MagicMock()
+            mock_content2 = MagicMock()
+            mock_function_call2 = MagicMock()
+            mock_function_call2.name = "search_web"
+            mock_function_call2.args = {"max_results": 10}
+            mock_part2 = MagicMock(text=None, function_call=mock_function_call2)
+            mock_content2.parts = [mock_part2]
+            mock_candidate2.content = mock_content2
+            mock_candidate2.usage_metadata = None
+            chunk2.candidates = [mock_candidate2]
+            yield chunk2
+
+        events = list(adapter.process_streaming_response(mock_stream(), response))
+
+        assert response._tool_calls
+        tool_calls = response._tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "search_web"
+        assert tool_calls[0].arguments == {"query": "llm", "max_results": 10}
+
+        tool_call_name_events = [e for e in events if e.type == "tool_call_name"]
+        assert len(tool_call_name_events) == 1
+        assert tool_call_name_events[0].chunk == "search_web"
+
+        tool_call_args_events = [e for e in events if e.type == "tool_call_args"]
+        assert len(tool_call_args_events) == 2
+
 
 class TestErrorNormalization:
     """测试错误归一化"""

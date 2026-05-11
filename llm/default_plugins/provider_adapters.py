@@ -290,7 +290,7 @@ class GeminiProviderAdapter(BaseProviderAdapter):
         tool_calls: Dict[int, Dict[str, Any]] = {}
         usage: Dict[str, Any] = {}
 
-        for chunk in response_object:
+        for chunk_idx, chunk in enumerate(response_object):
             candidates = getattr(chunk, "candidates", [])
             if not candidates:
                 continue
@@ -301,7 +301,7 @@ class GeminiProviderAdapter(BaseProviderAdapter):
                 continue
 
             parts = getattr(content, "parts", [])
-            for part in parts:
+            for part_idx, part in enumerate(parts):
                 text = getattr(part, "text", None)
                 if text:
                     full_text += text
@@ -309,12 +309,19 @@ class GeminiProviderAdapter(BaseProviderAdapter):
 
                 function_call = getattr(part, "function_call", None)
                 if function_call:
-                    idx = len(tool_calls)
                     tool_name = getattr(function_call, "name", None)
                     args = getattr(function_call, "args", {})
+
                     if tool_name:
-                        if idx not in tool_calls:
-                            tool_calls[idx] = {
+                        existing_idx = None
+                        for idx, tc in tool_calls.items():
+                            if tc["name"] == tool_name:
+                                existing_idx = idx
+                                break
+
+                        if existing_idx is None:
+                            new_idx = len(tool_calls)
+                            tool_calls[new_idx] = {
                                 "id": None,
                                 "name": tool_name,
                                 "arguments": {},
@@ -324,8 +331,11 @@ class GeminiProviderAdapter(BaseProviderAdapter):
                                 chunk=tool_name,
                                 tool_call_id=None,
                             )
-                        tool_calls[idx]["arguments"].update(args)
+
+                        idx = existing_idx if existing_idx is not None else new_idx
+
                         if args:
+                            tool_calls[idx]["arguments"].update(args)
                             yield StreamEvent(
                                 type="tool_call_args",
                                 chunk=json.dumps(args),
