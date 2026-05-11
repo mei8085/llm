@@ -504,6 +504,9 @@ class _BaseConversation:
     responses: List["_BaseResponse"] = field(default_factory=list)
     tools: Optional[List[ToolDef]] = None
     chain_limit: Optional[int] = None
+    compress_enabled: bool = False
+    compress_threshold: Optional[int] = None
+    compress_model_id: Optional[str] = None
 
     @classmethod
     @abstractmethod
@@ -575,6 +578,129 @@ class _BaseConversation:
 
         return chain
 
+    def _calculate_total_tokens(self) -> int:
+        """Calculate total tokens in the conversation history."""
+        total = 0
+        for response in self.responses:
+            if response.input_tokens is not None:
+                total += response.input_tokens
+            if response.output_tokens is not None:
+                total += response.output_tokens
+        return total
+
+    def _should_compress(self) -> bool:
+        """Check if conversation history should be compressed."""
+        if not self.compress_enabled or self.compress_threshold is None:
+            return False
+        total_tokens = self._calculate_total_tokens()
+        return total_tokens >= self.compress_threshold
+
+    def _generate_summary_prompt(self, messages: List[Any]) -> str:
+        """Generate a prompt for the summary model."""
+        from .parts import TextPart
+
+        conversation_lines = []
+        for msg in messages:
+            role = msg.role
+            content_parts = []
+            for part in msg.parts:
+                if isinstance(part, TextPart) and part.text:
+                    content_parts.append(part.text)
+            content = " ".join(content_parts)
+            conversation_lines.append(f"{role}: {content}")
+
+        conversation_text = "\n".join(conversation_lines)
+        return (
+            "请总结以下对话的关键要点，保持重要信息但减少token数量。\n\n"
+            "对话内容：\n"
+            f"{conversation_text}\n\n"
+            "请提供简洁的摘要："
+        )
+
+    def _compress_history(self, new_user_message: Optional[str] = None) -> Optional[dict]:
+        """
+        Compress the conversation history using a summary model.
+        Returns a dict with compression info if compression was performed, None otherwise.
+        """
+        if not self._should_compress():
+            return None
+
+        from .parts import Message, TextPart
+        from llm import get_model
+
+        # Build the full message chain without the new user message
+        chain_to_compress = []
+        if self.responses:
+            last = self.responses[-1]
+            chain_to_compress.extend(last.prompt.messages)
+            chain_to_compress.extend(last._messages_now())
+
+        if not chain_to_compress:
+            return None
+
+        # Get the system message if present
+        system_message = None
+        other_messages = []
+        for msg in chain_to_compress:
+            if msg.role == "system":
+                system_message = msg
+            else:
+                other_messages.append(msg)
+
+        # Determine which model to use for summarization
+        summary_model_id = self.compress_model_id or self.model.model_id
+        try:
+            summary_model = get_model(summary_model_id)
+        except Exception:
+            # Fall back to current model if summary model not available
+            summary_model = self.model
+
+        # Generate summary
+        summary_prompt = self._generate_summary_prompt(other_messages)
+
+        # Create response using summary model
+        summary_response = summary_model.prompt(
+            summary_prompt,
+            stream=False,
+        )
+        summary_text = summary_response.text()
+
+        # Count tokens before and after
+        original_tokens = self._calculate_total_tokens()
+
+        # Create a compressed message chain
+        compressed_messages = []
+        if system_message:
+            compressed_messages.append(system_message)
+
+        # Add summary as a system or user message
+        compressed_messages.append(
+            Message(
+                role="system",
+                parts=[TextPart(text=f"对话历史摘要：{summary_text}")],
+            )
+        )
+
+        # Add the new user message if provided
+        if new_user_message:
+            compressed_messages.append(
+                Message(
+                    role="user",
+                    parts=[TextPart(text=new_user_message)],
+                )
+            )
+
+        # Update responses to reflect compressed state
+        # We'll create a marker response to track the compression
+        compression_info = {
+            "original_token_count": original_tokens,
+            "summary_text": summary_text,
+            "summary_model_id": summary_model_id,
+            "compressed_messages": compressed_messages,
+        }
+
+        return compression_info
+
 
 @dataclass
 class Conversation(_BaseConversation):
@@ -599,15 +725,25 @@ class Conversation(_BaseConversation):
         **kwargs,
     ) -> "Response":
         merged = _merge_options(options, kwargs)
-        # Build the authoritative chain so response.prompt.messages
-        # equals exactly what the model sees for this turn.
-        chain = self._build_full_chain(
-            prompt=prompt,
-            attachments=attachments,
-            tool_results=tool_results,
-            explicit_messages=messages,
-        )
-        return Response(
+        
+        # Check if we need to compress history
+        compression_info = None
+        chain = None
+        if self._should_compress() and messages is None:
+            compression_info = self._compress_history(new_user_message=prompt)
+            if compression_info:
+                chain = compression_info["compressed_messages"]
+        
+        # If no compression was performed, build the normal chain
+        if chain is None:
+            chain = self._build_full_chain(
+                prompt=prompt,
+                attachments=attachments,
+                tool_results=tool_results,
+                explicit_messages=messages,
+            )
+        
+        response = Response(
             Prompt(
                 prompt,
                 model=self.model,
@@ -626,6 +762,12 @@ class Conversation(_BaseConversation):
             conversation=self,
             key=key,
         )
+        
+        # Store compression info on the response for logging
+        if compression_info:
+            response._compression_info = compression_info
+        
+        return response
 
     def chain(
         self,
@@ -651,13 +793,25 @@ class Conversation(_BaseConversation):
         # response.prompt.messages is authoritative for the first turn
         # of the chain loop. Subsequent tool-result turns extend the
         # chain via _chain_for_tool_results.
-        chain_messages = self._build_full_chain(
-            prompt=prompt,
-            attachments=attachments,
-            tool_results=tool_results,
-            explicit_messages=messages,
-        )
-        return ChainResponse(
+        
+        # Check if we need to compress history
+        compression_info = None
+        chain_messages = None
+        if self._should_compress() and messages is None:
+            compression_info = self._compress_history(new_user_message=prompt)
+            if compression_info:
+                chain_messages = compression_info["compressed_messages"]
+        
+        # If no compression was performed, build the normal chain
+        if chain_messages is None:
+            chain_messages = self._build_full_chain(
+                prompt=prompt,
+                attachments=attachments,
+                tool_results=tool_results,
+                explicit_messages=messages,
+            )
+        
+        chain_response = ChainResponse(
             Prompt(
                 prompt,
                 fragments=fragments,
@@ -679,6 +833,12 @@ class Conversation(_BaseConversation):
             after_call=after_call or self.after_call,
             chain_limit=chain_limit if chain_limit is not None else self.chain_limit,
         )
+        
+        # Store compression info for logging
+        if compression_info:
+            chain_response._compression_info = compression_info
+        
+        return chain_response
 
     @classmethod
     def from_row(cls, row):
@@ -721,13 +881,25 @@ class AsyncConversation(_BaseConversation):
         options: Optional[dict] = None,
     ) -> "AsyncChainResponse":
         self.model._validate_attachments(attachments)
-        chain_messages = self._build_full_chain(
-            prompt=prompt,
-            attachments=attachments,
-            tool_results=tool_results,
-            explicit_messages=messages,
-        )
-        return AsyncChainResponse(
+        
+        # Check if we need to compress history
+        compression_info = None
+        chain_messages = None
+        if self._should_compress() and messages is None:
+            compression_info = self._compress_history(new_user_message=prompt)
+            if compression_info:
+                chain_messages = compression_info["compressed_messages"]
+        
+        # If no compression was performed, build the normal chain
+        if chain_messages is None:
+            chain_messages = self._build_full_chain(
+                prompt=prompt,
+                attachments=attachments,
+                tool_results=tool_results,
+                explicit_messages=messages,
+            )
+        
+        chain_response = AsyncChainResponse(
             Prompt(
                 prompt,
                 fragments=fragments,
@@ -749,6 +921,12 @@ class AsyncConversation(_BaseConversation):
             after_call=after_call or self.after_call,
             chain_limit=chain_limit if chain_limit is not None else self.chain_limit,
         )
+        
+        # Store compression info for logging
+        if compression_info:
+            chain_response._compression_info = compression_info
+        
+        return chain_response
 
     def prompt(
         self,
@@ -768,13 +946,25 @@ class AsyncConversation(_BaseConversation):
         **kwargs,
     ) -> "AsyncResponse":
         merged = _merge_options(options, kwargs)
-        chain = self._build_full_chain(
-            prompt=prompt,
-            attachments=attachments,
-            tool_results=tool_results,
-            explicit_messages=messages,
-        )
-        return AsyncResponse(
+        
+        # Check if we need to compress history
+        compression_info = None
+        chain = None
+        if self._should_compress() and messages is None:
+            compression_info = self._compress_history(new_user_message=prompt)
+            if compression_info:
+                chain = compression_info["compressed_messages"]
+        
+        # If no compression was performed, build the normal chain
+        if chain is None:
+            chain = self._build_full_chain(
+                prompt=prompt,
+                attachments=attachments,
+                tool_results=tool_results,
+                explicit_messages=messages,
+            )
+        
+        response = AsyncResponse(
             Prompt(
                 prompt,
                 model=self.model,
@@ -793,6 +983,12 @@ class AsyncConversation(_BaseConversation):
             conversation=self,
             key=key,
         )
+        
+        # Store compression info for logging
+        if compression_info:
+            response._compression_info = compression_info
+        
+        return response
 
     def to_sync_conversation(self):
         return Conversation(
@@ -1503,6 +1699,22 @@ class _BaseResponse:
                         "order": index,
                     },
                 )
+
+        # Log compression info if available
+        if hasattr(self, "_compression_info") and self._compression_info:
+            import datetime
+
+            compression_info = self._compression_info
+            db["compressions"].insert(
+                {
+                    "conversation_id": conversation.id,
+                    "response_id": response_id,
+                    "original_token_count": compression_info.get("original_token_count"),
+                    "summary_text": compression_info.get("summary_text"),
+                    "summary_model_id": compression_info.get("summary_model_id"),
+                    "datetime_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
+            )
 
 
 def _response_to_dict(response: "_BaseResponse") -> ResponseDict:

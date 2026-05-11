@@ -426,3 +426,24 @@ def m022_response_reasoning(db):
     # NULL/empty when no reasoning was emitted or when the provider
     # only reported an opaque token count (the redacted-marker case).
     db["responses"].add_column("reasoning", str)
+
+
+@migration
+def m023_conversation_compression(db):
+    # Records conversation compression events
+    db["compressions"].create(
+        {
+            "id": int,
+            "conversation_id": str,
+            "response_id": str,
+            "original_token_count": int,
+            "summary_text": str,
+            "summary_model_id": str,
+            "datetime_utc": str,
+        },
+        pk="id",
+        foreign_keys=(
+            ("conversation_id", "conversations", "id"),
+            ("response_id", "responses", "id"),
+        ),
+    )

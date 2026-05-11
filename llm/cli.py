@@ -1061,6 +1061,24 @@ def prompt(
     default=5,
     help="How many chained tool responses to allow, default 5, set 0 for unlimited",
 )
+@click.option(
+    "compress",
+    "--compress",
+    is_flag=True,
+    help="Enable automatic conversation history compression when token budget is exceeded",
+)
+@click.option(
+    "compress_threshold",
+    "--compress-threshold",
+    type=int,
+    default=2000,
+    help="Token threshold for triggering compression, default 2000",
+)
+@click.option(
+    "compress_model",
+    "--compress-model",
+    help="Model to use for summarization (defaults to current model)",
+)
 def chat(
     system,
     model_id,
@@ -1080,6 +1098,9 @@ def chat(
     tools_debug,
     tools_approve,
     chain_limit,
+    compress,
+    compress_threshold,
+    compress_model,
 ):
     """
     Hold an ongoing chat with a model.
@@ -1140,6 +1161,11 @@ def chat(
     else:
         # Ensure it can see the API key
         conversation.model = model
+
+    # Configure compression settings
+    conversation.compress_enabled = compress
+    conversation.compress_threshold = compress_threshold
+    conversation.compress_model_id = compress_model
 
     if tools_debug:
         conversation.after_call = _debug_tool_call
