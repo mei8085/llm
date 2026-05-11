@@ -3091,3 +3091,260 @@ def _get_instance(implementation):
     if hasattr(implementation, "__self__"):
         return implementation.__self__
     return None
+
+
+class ProviderAdapter(ABC):
+    """统一的 Provider 适配接口
+
+    所有的 LLM Provider（OpenAI、Anthropic、Gemini 等）都应该实现这个接口，
+    以提供统一的调用方式和错误处理。
+
+    这个抽象基类定义了 Provider 需要实现的核心方法，包括：
+    - 消息构建
+    - 请求发送
+    - 响应处理
+    - 错误归一化
+    """
+
+    provider_name: str = "unknown"
+
+    @abstractmethod
+    def build_messages(
+        self, prompt: Prompt, *, conversation=None, image_detail=None
+    ) -> List[Dict[str, Any]]:
+        """将 Prompt 对象转换为 Provider 特定的消息格式
+
+        Args:
+            prompt: 包含用户输入、系统提示、工具等信息的 Prompt 对象
+            conversation: 可选的会话对象，用于获取历史上下文
+            image_detail: 可选的图片详细级别参数
+
+        Returns:
+            Provider 特定格式的消息列表
+        """
+        pass
+
+    @abstractmethod
+    def build_request_kwargs(self, prompt: Prompt, stream: bool) -> Dict[str, Any]:
+        """构建 Provider API 请求的关键字参数
+
+        Args:
+            prompt: Prompt 对象
+            stream: 是否使用流式响应
+
+        Returns:
+            包含请求参数的字典
+        """
+        pass
+
+    @abstractmethod
+    def get_client(self, key: Optional[str], *, async_: bool = False) -> Any:
+        """获取 Provider API 客户端
+
+        Args:
+            key: API 密钥
+            async_: 是否使用异步客户端
+
+        Returns:
+            Provider 客户端实例
+        """
+        pass
+
+    @abstractmethod
+    def process_streaming_response(
+        self, response_object, response: Response
+    ) -> Iterator[Union[str, "StreamEvent"]]:
+        """处理流式响应
+
+        Args:
+            response_object: Provider 返回的流式响应对象
+            response: llm Response 对象，用于设置 usage 等信息
+
+        Yields:
+            文本字符串或 StreamEvent 对象
+        """
+        pass
+
+    @abstractmethod
+    def process_non_streaming_response(
+        self, response_object, response: Response
+    ) -> Iterator[Union[str, "StreamEvent"]]:
+        """处理非流式响应
+
+        Args:
+            response_object: Provider 返回的响应对象
+            response: llm Response 对象，用于设置 usage 等信息
+
+        Yields:
+            文本字符串或 StreamEvent 对象
+        """
+        pass
+
+    @abstractmethod
+    def normalize_error(self, exception: Exception) -> Exception:
+        """将 Provider 特定的错误归一化为标准错误类型
+
+        Args:
+            exception: Provider 抛出的原始异常
+
+        Returns:
+            归一化后的标准错误类型
+        """
+        pass
+
+    def set_usage(self, response: Response, usage: Dict[str, Any]) -> None:
+        """设置响应的 token 使用量
+
+        Args:
+            response: llm Response 对象
+            usage: 包含 token 使用信息的字典
+        """
+        if not usage:
+            return
+        input_tokens = usage.pop("prompt_tokens", None)
+        output_tokens = usage.pop("completion_tokens", None)
+        usage.pop("total_tokens", None)
+        response.set_usage(
+            input=input_tokens,
+            output=output_tokens,
+            details=usage if usage else None,
+        )
+
+
+class AsyncProviderAdapter(ProviderAdapter):
+    """异步版本的 Provider 适配接口"""
+
+    @abstractmethod
+    async def process_streaming_response_async(
+        self, response_object, response: AsyncResponse
+    ) -> AsyncGenerator[Union[str, "StreamEvent"], None]:
+        """异步处理流式响应"""
+        pass
+
+    @abstractmethod
+    async def process_non_streaming_response_async(
+        self, response_object, response: AsyncResponse
+    ) -> AsyncGenerator[Union[str, "StreamEvent"], None]:
+        """异步处理非流式响应"""
+        pass
+
+
+class ProviderErrorNormalizer:
+    """Provider 错误归一化工具类
+
+    提供统一的错误归一化逻辑，将各种 Provider 的特定错误
+    转换为标准的 llm 错误类型。
+    """
+
+    @staticmethod
+    def normalize_openai_error(exception: Exception) -> Exception:
+        """归一化 OpenAI 错误
+
+        将 OpenAI SDK 抛出的各种异常转换为标准的 llm 错误类型。
+        """
+        import openai
+
+        if isinstance(exception, openai.AuthenticationError):
+            from .errors import ProviderAuthenticationError
+
+            return ProviderAuthenticationError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+                response=getattr(exception, "response", None),
+            )
+        elif isinstance(exception, openai.RateLimitError):
+            from .errors import ProviderRateLimitError
+
+            return ProviderRateLimitError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+                response=getattr(exception, "response", None),
+            )
+        elif isinstance(exception, openai.APIError):
+            from .errors import ProviderAPIError
+
+            return ProviderAPIError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+                response=getattr(exception, "response", None),
+            )
+        elif isinstance(exception, openai.APIConnectionError):
+            from .errors import ProviderConnectionError
+
+            return ProviderConnectionError(str(exception))
+        elif isinstance(exception, openai.APITimeoutError):
+            from .errors import ProviderTimeoutError
+
+            return ProviderTimeoutError(str(exception))
+        return exception
+
+    @staticmethod
+    def normalize_anthropic_error(exception: Exception) -> Exception:
+        """归一化 Anthropic 错误
+
+        将 Anthropic SDK 抛出的各种异常转换为标准的 llm 错误类型。
+        """
+        try:
+            import anthropic
+        except ImportError:
+            return exception
+
+        if isinstance(exception, anthropic.AuthenticationError):
+            from .errors import ProviderAuthenticationError
+
+            return ProviderAuthenticationError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+            )
+        elif isinstance(exception, anthropic.RateLimitError):
+            from .errors import ProviderRateLimitError
+
+            return ProviderRateLimitError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+            )
+        elif isinstance(exception, anthropic.APIError):
+            from .errors import ProviderAPIError
+
+            return ProviderAPIError(
+                str(exception),
+                status_code=getattr(exception, "status_code", None),
+            )
+        elif isinstance(exception, anthropic.APIConnectionError):
+            from .errors import ProviderConnectionError
+
+            return ProviderConnectionError(str(exception))
+        elif isinstance(exception, anthropic.APITimeoutError):
+            from .errors import ProviderTimeoutError
+
+            return ProviderTimeoutError(str(exception))
+        return exception
+
+    @staticmethod
+    def normalize_gemini_error(exception: Exception) -> Exception:
+        """归一化 Gemini 错误
+
+        将 Google Gemini SDK 抛出的各种异常转换为标准的 llm 错误类型。
+        """
+        try:
+            import google.api_core.exceptions as google_exceptions
+        except ImportError:
+            return exception
+
+        if isinstance(exception, google_exceptions.Unauthenticated):
+            from .errors import ProviderAuthenticationError
+
+            return ProviderAuthenticationError(str(exception))
+        elif isinstance(exception, google_exceptions.ResourceExhausted):
+            from .errors import ProviderRateLimitError
+
+            return ProviderRateLimitError(str(exception))
+        elif isinstance(exception, google_exceptions.GoogleAPIError):
+            from .errors import ProviderAPIError
+
+            return ProviderAPIError(str(exception))
+        elif isinstance(exception, google_exceptions.DeadlineExceeded):
+            from .errors import ProviderTimeoutError
+
+            return ProviderTimeoutError(str(exception))
+        return exception

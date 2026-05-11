@@ -1,10 +1,13 @@
 from llm import (
     AsyncConversation,
     AsyncKeyModel,
+    AsyncProviderAdapter,
     AsyncResponse,
     Conversation,
     EmbeddingModel,
     KeyModel,
+    ProviderAdapter,
+    ProviderErrorNormalizer,
     Prompt,
     Response,
     hookimpl,
@@ -683,6 +686,211 @@ def _attachment(attachment, image_detail=None):
         }
 
 
+class OpenAIProviderAdapter(ProviderAdapter):
+    """OpenAI Provider 适配器
+
+    实现 ProviderAdapter 接口，提供 OpenAI 特定的消息构建、
+    请求发送、响应处理和错误归一化。
+    """
+
+    provider_name = "openai"
+
+    def __init__(self, model_instance):
+        self.model_instance = model_instance
+
+    def build_messages(
+        self, prompt: Prompt, *, conversation=None, image_detail=None
+    ) -> List[Dict[str, Any]]:
+        return self.model_instance.build_messages(
+            prompt, conversation, image_detail=image_detail
+        )
+
+    def build_request_kwargs(self, prompt: Prompt, stream: bool) -> Dict[str, Any]:
+        return self.model_instance.build_kwargs(prompt, stream)
+
+    def get_client(self, key: Optional[str], *, async_: bool = False) -> Any:
+        return self.model_instance.get_client(key, async_=async_)
+
+    def normalize_error(self, exception: Exception) -> Exception:
+        return ProviderErrorNormalizer.normalize_openai_error(exception)
+
+    def process_streaming_response(
+        self, completion, response: Response
+    ) -> Iterator[Union[str, StreamEvent]]:
+        chunks = []
+        tool_calls = {}
+        usage = None
+        for chunk in completion:
+            chunks.append(chunk)
+            if chunk.usage:
+                usage = chunk.usage.model_dump()
+            if chunk.choices and chunk.choices[0].delta:
+                for tool_call in chunk.choices[0].delta.tool_calls or []:
+                    if tool_call.function.arguments is None:
+                        tool_call.function.arguments = ""
+                    idx = tool_call.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = tool_call
+                        yield StreamEvent(
+                            type="tool_call_name",
+                            chunk=tool_call.function.name or "",
+                            tool_call_id=tool_call.id,
+                        )
+                    else:
+                        tool_calls[
+                            idx
+                        ].function.arguments += tool_call.function.arguments
+                    if tool_call.function.arguments:
+                        yield StreamEvent(
+                            type="tool_call_args",
+                            chunk=tool_call.function.arguments,
+                            tool_call_id=tool_calls[idx].id,
+                        )
+                try:
+                    content = chunk.choices[0].delta.content
+                except IndexError:
+                    content = None
+                if content:
+                    yield StreamEvent(type="text", chunk=content)
+        response.response_json = remove_dict_none_values(combine_chunks(chunks))
+        if tool_calls:
+            for value in tool_calls.values():
+                response.add_tool_call(
+                    llm.ToolCall(
+                        tool_call_id=value.id,
+                        name=value.function.name,
+                        arguments=json.loads(value.function.arguments),
+                    )
+                )
+        self.set_usage(response, usage)
+        if usage and (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens"
+        ):
+            yield StreamEvent(type="reasoning", chunk="", redacted=True)
+
+    def process_non_streaming_response(
+        self, completion, response: Response
+    ) -> Iterator[Union[str, StreamEvent]]:
+        usage = completion.usage.model_dump() if completion.usage else None
+        response.response_json = remove_dict_none_values(completion.model_dump())
+        for tool_call in completion.choices[0].message.tool_calls or []:
+            response.add_tool_call(
+                llm.ToolCall(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.function.name,
+                    arguments=json.loads(tool_call.function.arguments),
+                )
+            )
+            yield StreamEvent(
+                type="tool_call_name",
+                chunk=tool_call.function.name or "",
+                tool_call_id=tool_call.id,
+            )
+            yield StreamEvent(
+                type="tool_call_args",
+                chunk=tool_call.function.arguments or "",
+                tool_call_id=tool_call.id,
+            )
+        if completion.choices[0].message.content is not None:
+            yield StreamEvent(
+                type="text",
+                chunk=completion.choices[0].message.content,
+            )
+        self.set_usage(response, usage)
+        if usage and (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens"
+        ):
+            yield StreamEvent(type="reasoning", chunk="", redacted=True)
+
+    async def process_streaming_response_async(
+        self, completion, response: AsyncResponse
+    ) -> AsyncGenerator[Union[str, StreamEvent], None]:
+        chunks = []
+        tool_calls = {}
+        usage = None
+        async for chunk in completion:
+            chunks.append(chunk)
+            if chunk.usage:
+                usage = chunk.usage.model_dump()
+            if chunk.choices and chunk.choices[0].delta:
+                for tool_call in chunk.choices[0].delta.tool_calls or []:
+                    if tool_call.function.arguments is None:
+                        tool_call.function.arguments = ""
+                    idx = tool_call.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = tool_call
+                        yield StreamEvent(
+                            type="tool_call_name",
+                            chunk=tool_call.function.name or "",
+                            tool_call_id=tool_call.id,
+                        )
+                    else:
+                        tool_calls[
+                            idx
+                        ].function.arguments += tool_call.function.arguments
+                    if tool_call.function.arguments:
+                        yield StreamEvent(
+                            type="tool_call_args",
+                            chunk=tool_call.function.arguments,
+                            tool_call_id=tool_calls[idx].id,
+                        )
+                try:
+                    content = chunk.choices[0].delta.content
+                except IndexError:
+                    content = None
+                if content:
+                    yield StreamEvent(type="text", chunk=content)
+        if tool_calls:
+            for value in tool_calls.values():
+                response.add_tool_call(
+                    llm.ToolCall(
+                        tool_call_id=value.id,
+                        name=value.function.name,
+                        arguments=json.loads(value.function.arguments),
+                    )
+                )
+        response.response_json = remove_dict_none_values(combine_chunks(chunks))
+        self.set_usage(response, usage)
+        if usage and (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens"
+        ):
+            yield StreamEvent(type="reasoning", chunk="", redacted=True)
+
+    async def process_non_streaming_response_async(
+        self, completion, response: AsyncResponse
+    ) -> AsyncGenerator[Union[str, StreamEvent], None]:
+        usage = completion.usage.model_dump() if completion.usage else None
+        response.response_json = remove_dict_none_values(completion.model_dump())
+        for tool_call in completion.choices[0].message.tool_calls or []:
+            response.add_tool_call(
+                llm.ToolCall(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.function.name,
+                    arguments=json.loads(tool_call.function.arguments),
+                )
+            )
+            yield StreamEvent(
+                type="tool_call_name",
+                chunk=tool_call.function.name or "",
+                tool_call_id=tool_call.id,
+            )
+            yield StreamEvent(
+                type="tool_call_args",
+                chunk=tool_call.function.arguments or "",
+                tool_call_id=tool_call.id,
+            )
+        if completion.choices[0].message.content is not None:
+            yield StreamEvent(
+                type="text",
+                chunk=completion.choices[0].message.content,
+            )
+        self.set_usage(response, usage)
+        if usage and (usage.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens"
+        ):
+            yield StreamEvent(type="reasoning", chunk="", redacted=True)
+
+
 class _Shared:
     def __init__(
         self,
@@ -915,6 +1123,9 @@ class Chat(_Shared, KeyModel):
 
     Options = build_options_class()
 
+    def _get_provider_adapter(self) -> OpenAIProviderAdapter:
+        return OpenAIProviderAdapter(self)
+
     def execute(
         self,
         prompt: Prompt,
@@ -925,105 +1136,37 @@ class Chat(_Shared, KeyModel):
     ) -> Iterator[Union[str, StreamEvent]]:
         if prompt.system and not self.allows_system_prompt:
             raise NotImplementedError("Model does not support system prompts")
-        messages = self.build_messages(
-            prompt,
-            conversation,
-            image_detail=getattr(prompt.options, "image_detail", None),
-        )
-        kwargs = self.build_kwargs(prompt, stream)
-        client = self.get_client(key)
-        usage = None
-        if stream:
-            completion = client.chat.completions.create(
-                model=self.model_name or self.model_id,
-                messages=messages,
-                stream=True,
-                **kwargs,
+
+        adapter = self._get_provider_adapter()
+        try:
+            messages = adapter.build_messages(
+                prompt,
+                conversation=conversation,
+                image_detail=getattr(prompt.options, "image_detail", None),
             )
-            chunks = []
-            tool_calls = {}
-            for chunk in completion:
-                chunks.append(chunk)
-                if chunk.usage:
-                    usage = chunk.usage.model_dump()
-                if chunk.choices and chunk.choices[0].delta:
-                    for tool_call in chunk.choices[0].delta.tool_calls or []:
-                        if tool_call.function.arguments is None:
-                            tool_call.function.arguments = ""
-                        idx = tool_call.index
-                        if idx not in tool_calls:
-                            tool_calls[idx] = tool_call
-                            yield StreamEvent(
-                                type="tool_call_name",
-                                chunk=tool_call.function.name or "",
-                                tool_call_id=tool_call.id,
-                            )
-                        else:
-                            tool_calls[
-                                idx
-                            ].function.arguments += tool_call.function.arguments
-                        if tool_call.function.arguments:
-                            yield StreamEvent(
-                                type="tool_call_args",
-                                chunk=tool_call.function.arguments,
-                                tool_call_id=tool_calls[idx].id,
-                            )
-                try:
-                    content = chunk.choices[0].delta.content
-                except IndexError:
-                    content = None
-                if content:
-                    # Empty strings are noise (OpenAI's first chunk
-                    # with role=assistant has content="").
-                    yield StreamEvent(type="text", chunk=content)
-            response.response_json = remove_dict_none_values(combine_chunks(chunks))
-            if tool_calls:
-                for value in tool_calls.values():
-                    response.add_tool_call(
-                        llm.ToolCall(
-                            tool_call_id=value.id,
-                            name=value.function.name,
-                            arguments=json.loads(value.function.arguments),
-                        )
-                    )
-        else:
-            completion = client.chat.completions.create(
-                model=self.model_name or self.model_id,
-                messages=messages,
-                stream=False,
-                **kwargs,
-            )
-            usage = completion.usage.model_dump()
-            response.response_json = remove_dict_none_values(completion.model_dump())
-            for tool_call in completion.choices[0].message.tool_calls or []:
-                response.add_tool_call(
-                    llm.ToolCall(
-                        tool_call_id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=json.loads(tool_call.function.arguments),
-                    )
+            kwargs = adapter.build_request_kwargs(prompt, stream)
+            client = adapter.get_client(key)
+
+            if stream:
+                completion = client.chat.completions.create(
+                    model=self.model_name or self.model_id,
+                    messages=messages,
+                    stream=True,
+                    **kwargs,
                 )
-                yield StreamEvent(
-                    type="tool_call_name",
-                    chunk=tool_call.function.name or "",
-                    tool_call_id=tool_call.id,
+                yield from adapter.process_streaming_response(completion, response)
+            else:
+                completion = client.chat.completions.create(
+                    model=self.model_name or self.model_id,
+                    messages=messages,
+                    stream=False,
+                    **kwargs,
                 )
-                yield StreamEvent(
-                    type="tool_call_args",
-                    chunk=tool_call.function.arguments or "",
-                    tool_call_id=tool_call.id,
-                )
-            if completion.choices[0].message.content is not None:
-                yield StreamEvent(
-                    type="text",
-                    chunk=completion.choices[0].message.content,
-                )
-        self.set_usage(response, usage)
-        if usage and (usage.get("completion_tokens_details") or {}).get(
-            "reasoning_tokens"
-        ):
-            yield StreamEvent(type="reasoning", chunk="", redacted=True)
-        response._prompt_json = redact_data({"messages": messages})
+                yield from adapter.process_non_streaming_response(completion, response)
+
+            response._prompt_json = redact_data({"messages": messages})
+        except Exception as e:
+            raise adapter.normalize_error(e)
 
 
 class AsyncChat(_Shared, AsyncKeyModel):
@@ -1032,6 +1175,9 @@ class AsyncChat(_Shared, AsyncKeyModel):
     default_max_tokens = None
 
     Options = build_options_class()
+
+    def _get_provider_adapter(self) -> OpenAIProviderAdapter:
+        return OpenAIProviderAdapter(self)
 
     async def execute(
         self,
@@ -1043,103 +1189,43 @@ class AsyncChat(_Shared, AsyncKeyModel):
     ) -> AsyncGenerator[Union[str, StreamEvent], None]:
         if prompt.system and not self.allows_system_prompt:
             raise NotImplementedError("Model does not support system prompts")
-        messages = self.build_messages(
-            prompt,
-            conversation,
-            image_detail=getattr(prompt.options, "image_detail", None),
-        )
-        kwargs = self.build_kwargs(prompt, stream)
-        client = self.get_client(key, async_=True)
-        usage = None
-        if stream:
-            completion = await client.chat.completions.create(
-                model=self.model_name or self.model_id,
-                messages=messages,
-                stream=True,
-                **kwargs,
+
+        adapter = self._get_provider_adapter()
+        try:
+            messages = adapter.build_messages(
+                prompt,
+                conversation=conversation,
+                image_detail=getattr(prompt.options, "image_detail", None),
             )
-            chunks = []
-            tool_calls = {}
-            async for chunk in completion:
-                if chunk.usage:
-                    usage = chunk.usage.model_dump()
-                chunks.append(chunk)
-                if chunk.choices and chunk.choices[0].delta:
-                    for tool_call in chunk.choices[0].delta.tool_calls or []:
-                        if tool_call.function.arguments is None:
-                            tool_call.function.arguments = ""
-                        idx = tool_call.index
-                        if idx not in tool_calls:
-                            tool_calls[idx] = tool_call
-                            yield StreamEvent(
-                                type="tool_call_name",
-                                chunk=tool_call.function.name or "",
-                                tool_call_id=tool_call.id,
-                            )
-                        else:
-                            tool_calls[
-                                idx
-                            ].function.arguments += tool_call.function.arguments
-                        if tool_call.function.arguments:
-                            yield StreamEvent(
-                                type="tool_call_args",
-                                chunk=tool_call.function.arguments,
-                                tool_call_id=tool_calls[idx].id,
-                            )
-                try:
-                    content = chunk.choices[0].delta.content
-                except IndexError:
-                    content = None
-                if content:
-                    yield StreamEvent(type="text", chunk=content)
-            if tool_calls:
-                for value in tool_calls.values():
-                    response.add_tool_call(
-                        llm.ToolCall(
-                            tool_call_id=value.id,
-                            name=value.function.name,
-                            arguments=json.loads(value.function.arguments),
-                        )
-                    )
-            response.response_json = remove_dict_none_values(combine_chunks(chunks))
-        else:
-            completion = await client.chat.completions.create(
-                model=self.model_name or self.model_id,
-                messages=messages,
-                stream=False,
-                **kwargs,
-            )
-            response.response_json = remove_dict_none_values(completion.model_dump())
-            usage = completion.usage.model_dump()
-            for tool_call in completion.choices[0].message.tool_calls or []:
-                response.add_tool_call(
-                    llm.ToolCall(
-                        tool_call_id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=json.loads(tool_call.function.arguments),
-                    )
+            kwargs = adapter.build_request_kwargs(prompt, stream)
+            client = adapter.get_client(key, async_=True)
+
+            if stream:
+                completion = await client.chat.completions.create(
+                    model=self.model_name or self.model_id,
+                    messages=messages,
+                    stream=True,
+                    **kwargs,
                 )
-                yield StreamEvent(
-                    type="tool_call_name",
-                    chunk=tool_call.function.name or "",
-                    tool_call_id=tool_call.id,
+                async for event in adapter.process_streaming_response_async(
+                    completion, response
+                ):
+                    yield event
+            else:
+                completion = await client.chat.completions.create(
+                    model=self.model_name or self.model_id,
+                    messages=messages,
+                    stream=False,
+                    **kwargs,
                 )
-                yield StreamEvent(
-                    type="tool_call_args",
-                    chunk=tool_call.function.arguments or "",
-                    tool_call_id=tool_call.id,
-                )
-            if completion.choices[0].message.content is not None:
-                yield StreamEvent(
-                    type="text",
-                    chunk=completion.choices[0].message.content,
-                )
-        self.set_usage(response, usage)
-        if usage and (usage.get("completion_tokens_details") or {}).get(
-            "reasoning_tokens"
-        ):
-            yield StreamEvent(type="reasoning", chunk="", redacted=True)
-        response._prompt_json = redact_data({"messages": messages})
+                async for event in adapter.process_non_streaming_response_async(
+                    completion, response
+                ):
+                    yield event
+
+            response._prompt_json = redact_data({"messages": messages})
+        except Exception as e:
+            raise adapter.normalize_error(e)
 
 
 class Completion(Chat):
@@ -1169,43 +1255,47 @@ class Completion(Chat):
             raise NotImplementedError(
                 "System prompts are not supported for OpenAI completion models"
             )
-        messages = []
-        if conversation is not None:
-            for prev_response in conversation.responses:
-                messages.append(prev_response.prompt.prompt)
-                messages.append(cast(Response, prev_response).text())
-        messages.append(prompt.prompt)
-        kwargs = self.build_kwargs(prompt, stream)
-        client = self.get_client(key)
-        if stream:
-            completion = client.completions.create(
-                model=self.model_name or self.model_id,
-                prompt="\n".join(messages),
-                stream=True,
-                **kwargs,
-            )
-            chunks = []
-            for chunk in completion:
-                chunks.append(chunk)
-                try:
-                    content = chunk.choices[0].text
-                except IndexError:
-                    content = None
-                if content is not None:
-                    yield content
-            combined = combine_chunks(chunks)
-            cleaned = remove_dict_none_values(combined)
-            response.response_json = cleaned
-        else:
-            completion = client.completions.create(
-                model=self.model_name or self.model_id,
-                prompt="\n".join(messages),
-                stream=False,
-                **kwargs,
-            )
-            response.response_json = remove_dict_none_values(completion.model_dump())
-            yield completion.choices[0].text
-        response._prompt_json = redact_data({"messages": messages})
+        adapter = self._get_provider_adapter()
+        try:
+            messages = []
+            if conversation is not None:
+                for prev_response in conversation.responses:
+                    messages.append(prev_response.prompt.prompt)
+                    messages.append(cast(Response, prev_response).text())
+            messages.append(prompt.prompt)
+            kwargs = self.build_kwargs(prompt, stream)
+            client = self.get_client(key)
+            if stream:
+                completion = client.completions.create(
+                    model=self.model_name or self.model_id,
+                    prompt="\n".join(messages),
+                    stream=True,
+                    **kwargs,
+                )
+                chunks = []
+                for chunk in completion:
+                    chunks.append(chunk)
+                    try:
+                        content = chunk.choices[0].text
+                    except IndexError:
+                        content = None
+                    if content is not None:
+                        yield content
+                combined = combine_chunks(chunks)
+                cleaned = remove_dict_none_values(combined)
+                response.response_json = cleaned
+            else:
+                completion = client.completions.create(
+                    model=self.model_name or self.model_id,
+                    prompt="\n".join(messages),
+                    stream=False,
+                    **kwargs,
+                )
+                response.response_json = remove_dict_none_values(completion.model_dump())
+                yield completion.choices[0].text
+            response._prompt_json = redact_data({"messages": messages})
+        except Exception as e:
+            raise adapter.normalize_error(e)
 
 
 def not_nulls(data) -> dict:
