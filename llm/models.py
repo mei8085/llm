@@ -628,70 +628,21 @@ class _BaseConversation:
         from .parts import Message, TextPart
         from llm import get_model
 
-        # Build the full message chain without the new user message
-        chain_to_compress = []
-        if self.responses:
-            last = self.responses[-1]
-            chain_to_compress.extend(last.prompt.messages)
-            chain_to_compress.extend(last._messages_now())
-
+        chain_to_compress = self._get_history_chain()
         if not chain_to_compress:
             return None
 
-        # Get the system message if present
-        system_message = None
-        other_messages = []
-        for msg in chain_to_compress:
-            if msg.role == "system":
-                system_message = msg
-            else:
-                other_messages.append(msg)
+        system_message, other_messages = self._split_system_and_other_messages(chain_to_compress)
 
-        # Determine which model to use for summarization
-        summary_model_id = self.compress_model_id or self.model.model_id
-        try:
-            summary_model = get_model(summary_model_id)
-        except Exception:
-            # Fall back to current model if summary model not available
-            summary_model = self.model
-
-        # Generate summary
-        summary_prompt = self._generate_summary_prompt(other_messages)
-
-        # Create response using summary model
-        summary_response = summary_model.prompt(
-            summary_prompt,
-            stream=False,
-        )
-        summary_text = summary_response.text()
-
-        # Count tokens before and after
+        summary_model = self._get_summary_model()
+        summary_text = self._generate_summary(summary_model, other_messages)
         original_tokens = self._calculate_total_tokens()
+        summary_model_id = self.compress_model_id or self.model.model_id
 
-        # Create a compressed message chain
-        compressed_messages = []
-        if system_message:
-            compressed_messages.append(system_message)
-
-        # Add summary as a system or user message
-        compressed_messages.append(
-            Message(
-                role="system",
-                parts=[TextPart(text=f"对话历史摘要：{summary_text}")],
-            )
+        compressed_messages = self._build_compressed_chain(
+            system_message, summary_text, new_user_message
         )
 
-        # Add the new user message if provided
-        if new_user_message:
-            compressed_messages.append(
-                Message(
-                    role="user",
-                    parts=[TextPart(text=new_user_message)],
-                )
-            )
-
-        # Update responses to reflect compressed state
-        # We'll create a marker response to track the compression
         compression_info = {
             "original_token_count": original_tokens,
             "summary_text": summary_text,
@@ -700,6 +651,74 @@ class _BaseConversation:
         }
 
         return compression_info
+
+    def _get_history_chain(self) -> List[Any]:
+        """Build the full message chain from conversation history."""
+        chain = []
+        if self.responses:
+            last = self.responses[-1]
+            chain.extend(last.prompt.messages)
+            chain.extend(last._messages_now())
+        return chain
+
+    def _split_system_and_other_messages(
+        self, messages: List[Any]
+    ) -> tuple[Optional[Any], List[Any]]:
+        """Split messages into system message and other messages."""
+        system_message = None
+        other_messages = []
+        for msg in messages:
+            if msg.role == "system":
+                system_message = msg
+            else:
+                other_messages.append(msg)
+        return system_message, other_messages
+
+    def _get_summary_model(self):
+        """Get the model to use for summarization, falling back to current model."""
+        from llm import get_model
+
+        summary_model_id = self.compress_model_id or self.model.model_id
+        try:
+            return get_model(summary_model_id)
+        except Exception:
+            return self.model
+
+    def _generate_summary(self, summary_model, messages: List[Any]) -> str:
+        """Generate a summary of the given messages using the summary model."""
+        summary_prompt = self._generate_summary_prompt(messages)
+        summary_response = summary_model.prompt(summary_prompt, stream=False)
+        return summary_response.text()
+
+    def _build_compressed_chain(
+        self,
+        system_message: Optional[Any],
+        summary_text: str,
+        new_user_message: Optional[str],
+    ) -> List[Any]:
+        """Build the compressed message chain with summary and new user message."""
+        from .parts import Message, TextPart
+
+        compressed_messages = []
+        if system_message:
+            compressed_messages.append(system_message)
+
+        compressed_messages.append(
+            Message(
+                role="system",
+                parts=[TextPart(text=f"对话历史摘要：{summary_text}")],
+            )
+        )
+
+        if new_user_message:
+            compressed_messages.append(
+                Message(
+                    role="user",
+                    parts=[TextPart(text=new_user_message)],
+                )
+            )
+
+        return compressed_messages
 
 
 @dataclass
