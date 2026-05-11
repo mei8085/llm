@@ -251,11 +251,14 @@ class AnthropicProviderAdapter(BaseProviderAdapter):
     ):
         if tool_calls:
             for tool_call in tool_calls.values():
-                if tool_call["name"] and tool_call["arguments"]:
+                if tool_call["name"] is not None:
                     try:
                         arguments = tool_call["arguments"]
                         if isinstance(arguments, str):
-                            arguments = json.loads(arguments)
+                            if arguments:
+                                arguments = json.loads(arguments)
+                            else:
+                                arguments = {}
                         response.add_tool_call(
                             llm.ToolCall(
                                 tool_call_id=tool_call["id"],
@@ -405,7 +408,7 @@ class GeminiProviderAdapter(BaseProviderAdapter):
     ):
         if tool_calls:
             for tool_call in tool_calls.values():
-                if tool_call["name"] and tool_call["arguments"]:
+                if tool_call["name"] is not None:
                     try:
                         response.add_tool_call(
                             llm.ToolCall(

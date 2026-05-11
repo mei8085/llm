@@ -191,6 +191,66 @@ class TestAnthropicProviderAdapter:
         assert response.input_tokens == 15
         assert response.output_tokens == 8
 
+    def test_process_non_streaming_tool_call_with_empty_args(self):
+        """测试处理无参工具调用（非流式）"""
+        adapter = AnthropicProviderAdapter(SimpleModel())
+
+        mock_model = MagicMock()
+        prompt = Prompt("test", mock_model)
+        response = Response(prompt, MagicMock(), stream=False)
+
+        mock_response_obj = MagicMock()
+        mock_tool_block = MagicMock()
+        mock_tool_block.type = "tool_use"
+        mock_tool_block.id = "tool_123"
+        mock_tool_block.name = "get_current_time"
+        mock_tool_block.input = {}
+        mock_response_obj.content = [mock_tool_block]
+        mock_response_obj.usage = MagicMock(input_tokens=5, output_tokens=3)
+
+        list(adapter.process_non_streaming_response(mock_response_obj, response))
+
+        assert response._tool_calls
+        tool_calls = response._tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_current_time"
+        assert tool_calls[0].arguments == {}
+        assert tool_calls[0].tool_call_id == "tool_123"
+
+    def test_process_streaming_tool_call_with_empty_args(self):
+        """测试处理无参工具调用（流式）"""
+        adapter = AnthropicProviderAdapter(SimpleModel())
+
+        mock_model = MagicMock()
+        prompt = Prompt("test", mock_model)
+        response = Response(prompt, MagicMock(), stream=True)
+
+        def mock_stream():
+            start_event = MagicMock()
+            start_event.type = "content_block_start"
+            start_event.index = 0
+            content_block = MagicMock()
+            content_block.type = "tool_use"
+            content_block.id = "tool_456"
+            content_block.name = "get_weather"
+            start_event.content_block = content_block
+            yield start_event
+
+            stop_event = MagicMock()
+            stop_event.type = "message_stop"
+            stop_event.message = MagicMock()
+            stop_event.message.usage = MagicMock(input_tokens=10, output_tokens=5)
+            yield stop_event
+
+        list(adapter.process_streaming_response(mock_stream(), response))
+
+        assert response._tool_calls
+        tool_calls = response._tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert tool_calls[0].arguments == {}
+        assert tool_calls[0].tool_call_id == "tool_456"
+
 
 class TestGeminiProviderAdapter:
     """测试 Gemini 适配器"""
@@ -250,6 +310,65 @@ class TestGeminiProviderAdapter:
         text_events = [e for e in events if e.type == "text"]
         assert len(text_events) == 4
         assert "".join(e.chunk for e in text_events) == "Hello from Gemini!"
+
+    def test_process_non_streaming_tool_call_with_empty_args(self):
+        """测试处理无参工具调用（非流式）"""
+        adapter = GeminiProviderAdapter(SimpleModel())
+
+        mock_model = MagicMock()
+        prompt = Prompt("test", mock_model)
+        response = Response(prompt, MagicMock(), stream=False)
+
+        mock_candidate = MagicMock()
+        mock_content = MagicMock()
+        mock_function_call = MagicMock()
+        mock_function_call.name = "get_current_time"
+        mock_function_call.args = {}
+        mock_part = MagicMock(text=None, function_call=mock_function_call)
+        mock_content.parts = [mock_part]
+        mock_candidate.content = mock_content
+        mock_candidate.usage_metadata = MagicMock(total_token_count=10)
+
+        mock_response_obj = MagicMock()
+        mock_response_obj.candidates = [mock_candidate]
+
+        list(adapter.process_non_streaming_response(mock_response_obj, response))
+
+        assert response._tool_calls
+        tool_calls = response._tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_current_time"
+        assert tool_calls[0].arguments == {}
+
+    def test_process_streaming_tool_call_with_empty_args(self):
+        """测试处理无参工具调用（流式）"""
+        adapter = GeminiProviderAdapter(SimpleModel())
+
+        mock_model = MagicMock()
+        prompt = Prompt("test", mock_model)
+        response = Response(prompt, MagicMock(), stream=True)
+
+        def mock_stream():
+            chunk = MagicMock()
+            mock_candidate = MagicMock()
+            mock_content = MagicMock()
+            mock_function_call = MagicMock()
+            mock_function_call.name = "get_weather"
+            mock_function_call.args = {}
+            mock_part = MagicMock(text=None, function_call=mock_function_call)
+            mock_content.parts = [mock_part]
+            mock_candidate.content = mock_content
+            mock_candidate.usage_metadata = None
+            chunk.candidates = [mock_candidate]
+            yield chunk
+
+        list(adapter.process_streaming_response(mock_stream(), response))
+
+        assert response._tool_calls
+        tool_calls = response._tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert tool_calls[0].arguments == {}
 
 
 class TestErrorNormalization:
