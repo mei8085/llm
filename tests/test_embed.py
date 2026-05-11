@@ -185,3 +185,102 @@ def test_binary_only_and_text_only_embedding_models():
         list(text_only.embed_multi([b"hello world"]))
 
     list(text_only.embed_multi(["hello world"]))
+
+
+def test_incremental_embed_multi_skips_existing_content(embed_demo):
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    model = collection.model()
+    
+    collection.embed_multi([("1", "hello"), ("2", "world")])
+    assert db["embeddings"].count == 2
+    initial_embedded = len(model.embedded_content)
+    assert initial_embedded == 2
+    
+    collection.embed_multi([("1", "hello"), ("3", "new"), ("2", "world"), ("4", "another")])
+    assert db["embeddings"].count == 4
+    assert len(model.embedded_content) == initial_embedded + 2
+
+
+def test_embed_multi_progress_callback():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    
+    progress_updates = []
+    
+    def callback(info):
+        progress_updates.append(info.copy())
+    
+    ids_and_texts = [("1", "hello"), ("2", "world"), ("3", "test"), ("4", "new")]
+    collection.embed_multi(ids_and_texts, batch_size=2, progress_callback=callback)
+    
+    assert len(progress_updates) == 2
+    for update in progress_updates:
+        assert "processed" in update
+        assert "embedded" in update
+        assert "skipped" in update
+        assert "total_embedded" in update
+        assert "total_skipped" in update
+        assert update["processed"] == 2
+        assert update["embedded"] == 2
+        assert update["skipped"] == 0
+    
+    assert progress_updates[-1]["total_embedded"] == 4
+    assert progress_updates[-1]["total_skipped"] == 0
+
+
+def test_incremental_embed_multi_with_progress():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    
+    collection.embed_multi([("1", "hello"), ("2", "world")])
+    
+    progress_updates = []
+    
+    def callback(info):
+        progress_updates.append(info.copy())
+    
+    collection.embed_multi(
+        [("1", "hello"), ("3", "new"), ("2", "world"), ("4", "another")],
+        batch_size=2,
+        progress_callback=callback
+    )
+    
+    total_processed = sum(u["processed"] for u in progress_updates)
+    assert total_processed == 4
+    assert progress_updates[-1]["total_embedded"] == 2
+    assert progress_updates[-1]["total_skipped"] == 2
+    
+    assert progress_updates[0]["processed"] == 2
+    assert progress_updates[0]["embedded"] == 1
+    assert progress_updates[0]["skipped"] == 1
+    assert progress_updates[1]["processed"] == 2
+    assert progress_updates[1]["embedded"] == 1
+    assert progress_updates[1]["skipped"] == 1
+
+
+def test_embed_multi_with_metadata_progress_callback():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    
+    progress_updates = []
+    
+    def callback(info):
+        progress_updates.append(info.copy())
+    
+    entries = [
+        ("1", "hello", {"meta": "1"}),
+        ("2", "world", {"meta": "2"}),
+        ("3", "test", {"meta": "3"}),
+    ]
+    collection.embed_multi_with_metadata(entries, batch_size=2, progress_callback=callback)
+    
+    assert len(progress_updates) == 2
+    assert progress_updates[0]["processed"] == 2
+    assert progress_updates[0]["embedded"] == 2
+    assert progress_updates[0]["skipped"] == 0
+    assert progress_updates[1]["processed"] == 1
+    assert progress_updates[1]["embedded"] == 1
+    assert progress_updates[1]["skipped"] == 0
+    assert progress_updates[-1]["total_embedded"] == 3
+    assert progress_updates[-1]["total_skipped"] == 0

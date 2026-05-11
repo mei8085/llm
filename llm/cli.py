@@ -3405,11 +3405,33 @@ def embed_multi(
     total_embedded = 0
     total_skipped = 0
 
+    def get_progress_label() -> str:
+        if expected_length:
+            percent = (total_processed / expected_length) * 100 if expected_length > 0 else 0
+            return (
+                f"Embedding: {total_processed}/{expected_length} ({percent:.1f}%) - "
+                f"Embedded: {total_embedded}, Skipped: {total_skipped}"
+            )
+        return f"Embedding: Processed={total_processed}, Embedded={total_embedded}, Skipped={total_skipped}"
+
+    bar = click.progressbar(
+        length=expected_length,
+        label=get_progress_label(),
+        show_percent=False,
+        show_pos=False,
+        file=sys.stderr,
+    )
+
     def progress_callback(progress_info: Dict[str, Any]) -> None:
-        nonlocal total_processed, total_embedded, total_skipped
-        total_processed += progress_info["processed"]
+        nonlocal total_processed, total_embedded, total_skipped, bar
+        processed_in_batch = progress_info["processed"]
+        embedded_in_batch = progress_info["embedded"]
+        skipped_in_batch = progress_info["skipped"]
+        total_processed += processed_in_batch
         total_embedded = progress_info["total_embedded"]
         total_skipped = progress_info["total_skipped"]
+        bar.label = get_progress_label()
+        bar.update(processed_in_batch)
 
     def tuples() -> Iterable[Tuple[str, Union[bytes, str]]]:
         for row in rows:
@@ -3428,12 +3450,9 @@ def embed_multi(
     if batch_size:
         embed_kwargs["batch_size"] = batch_size
 
-    click.echo("Embedding...", err=True)
-    collection_obj.embed_multi(tuples(), **embed_kwargs)
-    click.echo(
-        f"Processed: {total_processed}, Embedded: {total_embedded}, Skipped: {total_skipped}",
-        err=True,
-    )
+    with bar:
+        collection_obj.embed_multi(tuples(), **embed_kwargs)
+        bar.label = get_progress_label()
 
 
 @cli.command()
