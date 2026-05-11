@@ -502,6 +502,12 @@ def cli():
 )
 @click.option("--key", help="API key to use")
 @click.option("--save", help="Save prompt with this template name")
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Tags to associate with the saved template version",
+)
 @click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")
 @click.option("-u", "--usage", is_flag=True, help="Show token usage")
 @click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")
@@ -540,6 +546,7 @@ def prompt(
     conversation_id,
     key,
     save,
+    tags,
     async_,
     usage,
     extract,
@@ -643,7 +650,6 @@ def prompt(
             raise click.ClickException(
                 "--save cannot be used with {}".format(", ".join(disallowed_options))
             )
-        path = template_dir() / f"{save}.yaml"
         to_save = {}
         if model_id:
             model_aliases = get_model_aliases()
@@ -696,15 +702,7 @@ def prompt(
                 }
             except pydantic.ValidationError as ex:
                 raise click.ClickException(render_errors(ex.errors()))
-        path.write_text(
-            yaml.safe_dump(
-                to_save,
-                indent=4,
-                default_flow_style=False,
-                sort_keys=False,
-            ),
-            "utf-8",
-        )
+        save_template_with_version(save, to_save, tags if tags else None)
         return
 
     if template:
@@ -2477,6 +2475,72 @@ def templates_loaders():
         click.echo("No template loaders found")
 
 
+@templates.command(name="versions")
+@click.argument("name")
+def templates_versions(name):
+    "List versions of the specified template"
+    metadata = load_template_metadata(name)
+    if metadata["latest_version"] == 0:
+        click.echo(f"Template '{name}' has no versions yet")
+        return
+    click.echo(f"Latest version: v{metadata['latest_version']}")
+    click.echo()
+    click.echo("Versions:")
+    for version_str in sorted(metadata["versions"].keys(), key=int):
+        tags = [t for t, v in metadata["tags"].items() if v == int(version_str)]
+        tag_str = f" (tags: {', '.join(tags)})" if tags else ""
+        click.echo(f"  v{version_str}{tag_str}")
+    if metadata["tags"]:
+        click.echo()
+        click.echo("Tags:")
+        for tag, version in metadata["tags"].items():
+            click.echo(f"  {tag} -> v{version}")
+
+
+@templates.command(name="show-version")
+@click.argument("name")
+@click.argument("version")
+def templates_show_version(name, version):
+    "Show a specific version of a template"
+    try:
+        if version.startswith("v") and version[1:].isdigit():
+            template = get_template_by_version(name, int(version[1:]))
+        else:
+            template = get_template_by_tag(name, version)
+    except LoadTemplateError as ex:
+        raise click.ClickException(str(ex))
+    click.echo(
+        yaml.dump(
+            dict((k, v) for k, v in template.model_dump().items() if v is not None),
+            indent=4,
+            default_flow_style=False,
+        )
+    )
+
+
+@templates.command(name="tag")
+@click.argument("name")
+@click.argument("tag")
+@click.option("--version", help="Version to tag (e.g., v1), defaults to latest")
+def templates_tag(name, tag, version):
+    "Tag a specific version of a template"
+    metadata = load_template_metadata(name)
+    if metadata["latest_version"] == 0:
+        raise click.ClickException(f"Template '{name}' has no versions yet")
+    if version:
+        if version.startswith("v") and version[1:].isdigit():
+            version_num = int(version[1:])
+        else:
+            raise click.ClickException("Version must be in format v1, v2, etc.")
+    else:
+        version_num = metadata["latest_version"]
+    if str(version_num) not in metadata["versions"]:
+        raise click.ClickException(f"Template '{name}' has no version v{version_num}")
+    metadata["tags"][tag] = version_num
+    save_template_metadata(name, metadata)
+    click.echo(f"Tagged v{version_num} as '{tag}'")
+
+
 @cli.group(
     cls=DefaultGroup,
     default="list",
@@ -3786,6 +3850,109 @@ def template_dir():
     return path
 
 
+def template_versions_dir(template_name: str):
+    path = template_dir() / ".versions" / template_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def template_metadata_path(template_name: str):
+    return template_versions_dir(template_name) / "metadata.json"
+
+
+def load_template_metadata(template_name: str):
+    metadata_path = template_metadata_path(template_name)
+    if metadata_path.exists():
+        try:
+            return json.loads(metadata_path.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {"latest_version": 0, "versions": {}, "tags": {}}
+
+
+def save_template_metadata(template_name: str, metadata: dict):
+    metadata_path = template_metadata_path(template_name)
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+
+
+def get_next_version(template_name: str):
+    metadata = load_template_metadata(template_name)
+    return metadata["latest_version"] + 1
+
+
+def version_file_path(template_name: str, version: int):
+    return template_versions_dir(template_name) / f"v{version}.yaml"
+
+
+def resolve_template_ref(template_ref: str):
+    if "@" in template_ref:
+        name, ref = template_ref.split("@", 1)
+        return name, ref
+    return template_ref, None
+
+
+def get_template_by_version(template_name: str, version: int):
+    metadata = load_template_metadata(template_name)
+    if str(version) not in metadata["versions"]:
+        raise LoadTemplateError(f"Template '{template_name}' has no version {version}")
+    version_path = version_file_path(template_name, version)
+    if not version_path.exists():
+        raise LoadTemplateError(f"Template '{template_name}' version {version} file not found")
+    content = version_path.read_text()
+    template_obj = _parse_yaml_template(template_name, content)
+    template_obj._functions_is_trusted = True
+    return template_obj
+
+
+def get_template_by_tag(template_name: str, tag: str):
+    metadata = load_template_metadata(template_name)
+    if tag not in metadata["tags"]:
+        raise LoadTemplateError(f"Template '{template_name}' has no tag '{tag}'")
+    version = metadata["tags"][tag]
+    return get_template_by_version(template_name, version)
+
+
+def save_template_with_version(template_name: str, template_data: dict, tags: Optional[List[str]] = None):
+    path = template_dir() / f"{template_name}.yaml"
+    metadata = load_template_metadata(template_name)
+    next_version = get_next_version(template_name)
+    template_data["version"] = next_version
+    if tags:
+        template_data["tags"] = tags
+    if path.exists():
+        current_content = path.read_text()
+        version_path = version_file_path(template_name, metadata["latest_version"])
+        if metadata["latest_version"] > 0 and not version_path.exists():
+            version_path.write_text(current_content)
+    path.write_text(
+        yaml.safe_dump(
+            template_data,
+            indent=4,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        "utf-8",
+    )
+    new_version_path = version_file_path(template_name, next_version)
+    new_version_path.write_text(
+        yaml.safe_dump(
+            template_data,
+            indent=4,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        "utf-8",
+    )
+    metadata["latest_version"] = next_version
+    metadata["versions"][str(next_version)] = {
+        "created_at": None,
+    }
+    if tags:
+        for tag in tags:
+            metadata["tags"][tag] = next_version
+    save_template_metadata(template_name, metadata)
+
+
 def logs_db_path():
     return user_dir() / "logs.db"
 
@@ -3978,17 +4145,26 @@ def load_template(name: str) -> Template:
         except Exception as ex:
             raise LoadTemplateError("Could not load template {}: {}".format(name, ex))
 
-    # Try local file
     if potential_path.exists():
-        path = potential_path
-    else:
-        # Look for template in template_dir()
-        path = template_dir() / f"{name}.yaml"
+        content = potential_path.read_text()
+        template_obj = _parse_yaml_template(name, content)
+        template_obj._functions_is_trusted = True
+        return template_obj
+
+    template_name, version_ref = resolve_template_ref(name)
+    path = template_dir() / f"{template_name}.yaml"
     if not path.exists():
         raise LoadTemplateError(f"Invalid template: {name}")
+
+    if version_ref:
+        if version_ref.startswith("v") and version_ref[1:].isdigit():
+            version = int(version_ref[1:])
+            return get_template_by_version(template_name, version)
+        else:
+            return get_template_by_tag(template_name, version_ref)
+
     content = path.read_text()
-    template_obj = _parse_yaml_template(name, content)
-    # We trust functions here because they came from the filesystem
+    template_obj = _parse_yaml_template(template_name, content)
     template_obj._functions_is_trusted = True
     return template_obj
 

@@ -12,6 +12,8 @@ class Template(BaseModel):
     """A reusable prompt template."""
 
     name: str
+    version: Optional[int] = None
+    tags: Optional[List[str]] = None
     prompt: Optional[str] = None
     system: Optional[str] = None
     attachments: Optional[List[str]] = None

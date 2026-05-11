@@ -559,3 +559,159 @@ def test_tools_in_templates(
     finally:
         after()
         pm.unregister(name="greetings-plugin")
+
+
+def test_template_versioning_saves_new_version(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(
+            cli, ["Version 1 prompt", "--save", "my-template"], catch_exceptions=False
+        )
+        assert result.exit_code == 0
+        template_file = templates_path / "my-template.yaml"
+        assert template_file.exists()
+        versions_dir = templates_path / ".versions" / "my-template"
+        assert versions_dir.exists()
+        v1_file = versions_dir / "v1.yaml"
+        assert v1_file.exists()
+        result = runner.invoke(
+            cli, ["Version 2 prompt", "--save", "my-template"], catch_exceptions=False
+        )
+        assert result.exit_code == 0
+        v2_file = versions_dir / "v2.yaml"
+        assert v2_file.exists()
+        v1_content = yaml.safe_load(v1_file.read_text("utf-8"))
+        v2_content = yaml.safe_load(v2_file.read_text("utf-8"))
+        assert v1_content["version"] == 1
+        assert v2_content["version"] == 2
+        assert v1_content["prompt"] == "Version 1 prompt"
+        assert v2_content["prompt"] == "Version 2 prompt"
+
+
+def test_template_load_latest_version_by_default(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        from llm.cli import load_template
+        template = load_template("my-template")
+        assert template.version == 2
+        assert template.prompt == "Version 2"
+
+
+def test_template_load_specific_version(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        from llm.cli import load_template
+        template_v1 = load_template("my-template@v1")
+        assert template_v1.version == 1
+        assert template_v1.prompt == "Version 1"
+        template_v2 = load_template("my-template@v2")
+        assert template_v2.version == 2
+        assert template_v2.prompt == "Version 2"
+
+
+def test_template_tags(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template", "--tag", "initial"],
+            catch_exceptions=False,
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        from llm.cli import load_template
+        template_by_tag = load_template("my-template@initial")
+        assert template_by_tag.version == 1
+        assert template_by_tag.prompt == "Version 1"
+
+
+def test_template_tag_command(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        result = runner.invoke(
+            cli, ["templates", "tag", "my-template", "stable", "--version", "v1"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert "Tagged v1 as 'stable'" in result.output
+        from llm.cli import load_template
+        template_by_tag = load_template("my-template@stable")
+        assert template_by_tag.version == 1
+
+
+def test_template_versions_command(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template", "--tag", "initial"],
+            catch_exceptions=False,
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        result = runner.invoke(
+            cli, ["templates", "versions", "my-template"], catch_exceptions=False
+        )
+        assert result.exit_code == 0
+        assert "Latest version: v2" in result.output
+        assert "v1" in result.output
+        assert "v2" in result.output
+        assert "initial" in result.output
+
+
+def test_template_show_version_command(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        runner.invoke(
+            cli, ["Version 2", "--save", "my-template"], catch_exceptions=False
+        )
+        result = runner.invoke(
+            cli, ["templates", "show-version", "my-template", "v1"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert "version: 1" in result.output
+        assert "Version 1" in result.output
+
+
+def test_template_load_invalid_version(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        from llm.cli import load_template, LoadTemplateError
+        with pytest.raises(LoadTemplateError):
+            load_template("my-template@v999")
+
+
+def test_template_load_invalid_tag(templates_path):
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        runner.invoke(
+            cli, ["Version 1", "--save", "my-template"], catch_exceptions=False
+        )
+        from llm.cli import load_template, LoadTemplateError
+        with pytest.raises(LoadTemplateError):
+            load_template("my-template@nonexistent")
