@@ -341,6 +341,141 @@ def schema_option(fn):
     return fn
 
 
+def model_option(fn):
+    click.option(
+        "model_id", "-m", "--model", help="Model to use", envvar="LLM_MODEL"
+    )(fn)
+    return fn
+
+
+def system_option(fn):
+    click.option("-s", "--system", help="System prompt to use")(fn)
+    return fn
+
+
+def template_option(fn):
+    click.option("-t", "--template", help="Template to use")(fn)
+    click.option(
+        "-p",
+        "--param",
+        multiple=True,
+        type=(str, str),
+        help="Parameters for template",
+    )(fn)
+    return fn
+
+
+def fragments_option(fn):
+    click.option(
+        "fragments",
+        "-f",
+        "--fragment",
+        multiple=True,
+        help="Fragment (alias, URL, hash or file path) to add to the prompt",
+    )(fn)
+    click.option(
+        "system_fragments",
+        "--sf",
+        "--system-fragment",
+        multiple=True,
+        help="Fragment to add to system prompt",
+    )(fn)
+    return fn
+
+
+def options_option(fn):
+    click.option(
+        "options",
+        "-o",
+        "--option",
+        type=(str, str),
+        multiple=True,
+        help="key/value options for the model",
+    )(fn)
+    return fn
+
+
+def tools_option(fn):
+    click.option(
+        "tools",
+        "-T",
+        "--tool",
+        multiple=True,
+        help="Name of a tool to make available to the model",
+    )(fn)
+    click.option(
+        "python_tools",
+        "--functions",
+        help="Python code block or file path defining functions to register as tools",
+        multiple=True,
+    )(fn)
+    click.option(
+        "tools_debug",
+        "--td",
+        "--tools-debug",
+        is_flag=True,
+        help="Show full details of tool executions",
+        envvar="LLM_TOOLS_DEBUG",
+    )(fn)
+    click.option(
+        "tools_approve",
+        "--ta",
+        "--tools-approve",
+        is_flag=True,
+        help="Manually approve every tool execution",
+    )(fn)
+    click.option(
+        "chain_limit",
+        "--cl",
+        "--chain-limit",
+        type=int,
+        default=5,
+        help="How many chained tool responses to allow, default 5, set 0 for unlimited",
+    )(fn)
+    return fn
+
+
+def conversation_option(fn):
+    click.option(
+        "_continue",
+        "-c",
+        "--continue",
+        is_flag=True,
+        flag_value=-1,
+        help="Continue the most recent conversation.",
+    )(fn)
+    click.option(
+        "conversation_id",
+        "--cid",
+        "--conversation",
+        help="Continue the conversation with the given ID.",
+    )(fn)
+    return fn
+
+
+def common_prompt_chat_options(fn):
+    """Common options for both prompt and chat commands."""
+    fn = system_option(fn)
+    fn = model_option(fn)
+    fn = conversation_option(fn)
+    fn = fragments_option(fn)
+    fn = template_option(fn)
+    fn = options_option(fn)
+    click.option(
+        "-d",
+        "--database",
+        type=click.Path(readable=True, dir_okay=False),
+        help="Path to log database",
+    )(fn)
+    click.option("--no-stream", is_flag=True, help="Do not stream output")(fn)
+    click.option(
+        "-R", "--no-reasoning", is_flag=True, help="Don't display reasoning output"
+    )(fn)
+    click.option("--key", help="API key to use")(fn)
+    fn = tools_option(fn)
+    return fn
+
+
 @click.group(
     cls=DefaultGroup,
     default="prompt",
@@ -377,14 +512,6 @@ def cli():
 
 @cli.command(name="prompt")
 @click.argument("prompt", required=False)
-@click.option("-s", "--system", help="System prompt to use")
-@click.option("model_id", "-m", "--model", help="Model to use", envvar="LLM_MODEL")
-@click.option(
-    "-d",
-    "--database",
-    type=click.Path(readable=True, dir_okay=False),
-    help="Path to log database",
-)
 @click.option(
     "queries",
     "-q",
@@ -409,98 +536,14 @@ def cli():
     callback=attachment_types_callback,
     help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
 )
-@click.option(
-    "tools",
-    "-T",
-    "--tool",
-    multiple=True,
-    help="Name of a tool to make available to the model",
-)
-@click.option(
-    "python_tools",
-    "--functions",
-    help="Python code block or file path defining functions to register as tools",
-    multiple=True,
-)
-@click.option(
-    "tools_debug",
-    "--td",
-    "--tools-debug",
-    is_flag=True,
-    help="Show full details of tool executions",
-    envvar="LLM_TOOLS_DEBUG",
-)
-@click.option(
-    "tools_approve",
-    "--ta",
-    "--tools-approve",
-    is_flag=True,
-    help="Manually approve every tool execution",
-)
-@click.option(
-    "chain_limit",
-    "--cl",
-    "--chain-limit",
-    type=int,
-    default=5,
-    help="How many chained tool responses to allow, default 5, set 0 for unlimited",
-)
-@click.option(
-    "options",
-    "-o",
-    "--option",
-    type=(str, str),
-    multiple=True,
-    help="key/value options for the model",
-)
 @schema_option
 @click.option(
     "--schema-multi",
     help="JSON schema to use for multiple results",
 )
-@click.option(
-    "fragments",
-    "-f",
-    "--fragment",
-    multiple=True,
-    help="Fragment (alias, URL, hash or file path) to add to the prompt",
-)
-@click.option(
-    "system_fragments",
-    "--sf",
-    "--system-fragment",
-    multiple=True,
-    help="Fragment to add to system prompt",
-)
-@click.option("-t", "--template", help="Template to use")
-@click.option(
-    "-p",
-    "--param",
-    multiple=True,
-    type=(str, str),
-    help="Parameters for template",
-)
-@click.option("--no-stream", is_flag=True, help="Do not stream output")
+@common_prompt_chat_options
 @click.option("-n", "--no-log", is_flag=True, help="Don't log to database")
 @click.option("--log", is_flag=True, help="Log prompt and response to the database")
-@click.option(
-    "-R", "--no-reasoning", is_flag=True, help="Don't display reasoning output"
-)
-@click.option(
-    "_continue",
-    "-c",
-    "--continue",
-    is_flag=True,
-    flag_value=-1,
-    help="Continue the most recent conversation.",
-)
-@click.option(
-    "conversation_id",
-    "--cid",
-    "--conversation",
-    help="Continue the conversation with the given ID.",
-)
-@click.option("--key", help="API key to use")
 @click.option("--save", help="Save prompt with this template name")
 @click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")
 @click.option("-u", "--usage", is_flag=True, help="Show token usage")
@@ -514,31 +557,31 @@ def cli():
 )
 def prompt(
     prompt,
-    system,
-    model_id,
-    database,
     queries,
     attachments,
     attachment_types,
+    schema_input,
+    schema_multi,
+    system,
+    model_id,
+    _continue,
+    conversation_id,
+    fragments,
+    system_fragments,
+    template,
+    param,
+    options,
+    database,
+    no_stream,
+    no_reasoning,
+    key,
     tools,
     python_tools,
     tools_debug,
     tools_approve,
     chain_limit,
-    options,
-    schema_input,
-    schema_multi,
-    fragments,
-    system_fragments,
-    template,
-    param,
-    no_stream,
     no_log,
     log,
-    no_reasoning,
-    _continue,
-    conversation_id,
-    key,
     save,
     async_,
     usage,
@@ -968,99 +1011,7 @@ def prompt(
 
 
 @cli.command()
-@click.option("-s", "--system", help="System prompt to use")
-@click.option("model_id", "-m", "--model", help="Model to use", envvar="LLM_MODEL")
-@click.option(
-    "_continue",
-    "-c",
-    "--continue",
-    is_flag=True,
-    flag_value=-1,
-    help="Continue the most recent conversation.",
-)
-@click.option(
-    "conversation_id",
-    "--cid",
-    "--conversation",
-    help="Continue the conversation with the given ID.",
-)
-@click.option(
-    "fragments",
-    "-f",
-    "--fragment",
-    multiple=True,
-    help="Fragment (alias, URL, hash or file path) to add to the prompt",
-)
-@click.option(
-    "system_fragments",
-    "--sf",
-    "--system-fragment",
-    multiple=True,
-    help="Fragment to add to system prompt",
-)
-@click.option("-t", "--template", help="Template to use")
-@click.option(
-    "-p",
-    "--param",
-    multiple=True,
-    type=(str, str),
-    help="Parameters for template",
-)
-@click.option(
-    "options",
-    "-o",
-    "--option",
-    type=(str, str),
-    multiple=True,
-    help="key/value options for the model",
-)
-@click.option(
-    "-d",
-    "--database",
-    type=click.Path(readable=True, dir_okay=False),
-    help="Path to log database",
-)
-@click.option("--no-stream", is_flag=True, help="Do not stream output")
-@click.option(
-    "-R", "--no-reasoning", is_flag=True, help="Don't display reasoning output"
-)
-@click.option("--key", help="API key to use")
-@click.option(
-    "tools",
-    "-T",
-    "--tool",
-    multiple=True,
-    help="Name of a tool to make available to the model",
-)
-@click.option(
-    "python_tools",
-    "--functions",
-    help="Python code block or file path defining functions to register as tools",
-    multiple=True,
-)
-@click.option(
-    "tools_debug",
-    "--td",
-    "--tools-debug",
-    is_flag=True,
-    help="Show full details of tool executions",
-    envvar="LLM_TOOLS_DEBUG",
-)
-@click.option(
-    "tools_approve",
-    "--ta",
-    "--tools-approve",
-    is_flag=True,
-    help="Manually approve every tool execution",
-)
-@click.option(
-    "chain_limit",
-    "--cl",
-    "--chain-limit",
-    type=int,
-    default=5,
-    help="How many chained tool responses to allow, default 5, set 0 for unlimited",
-)
+@common_prompt_chat_options
 def chat(
     system,
     model_id,
@@ -1071,10 +1022,10 @@ def chat(
     template,
     param,
     options,
+    database,
     no_stream,
     no_reasoning,
     key,
-    database,
     tools,
     python_tools,
     tools_debug,
