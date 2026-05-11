@@ -3401,27 +3401,39 @@ def embed_multi(
         except json.JSONDecodeError as ex:
             raise click.ClickException(str(ex))
 
-    with click.progressbar(
-        rows, label="Embedding", show_percent=True, length=expected_length
-    ) as rows:
+    total_processed = 0
+    total_embedded = 0
+    total_skipped = 0
 
-        def tuples() -> Iterable[Tuple[str, Union[bytes, str]]]:
-            for row in rows:
-                values = list(row.values())
-                id: str = prefix + str(values[0])
-                content: Optional[Union[bytes, str]] = None
-                if binary:
-                    content = cast(bytes, values[1])
-                else:
-                    content = " ".join(v or "" for v in values[1:])
-                if prepend and isinstance(content, str):
-                    content = prepend + content
-                yield id, content or ""
+    def progress_callback(progress_info: Dict[str, Any]) -> None:
+        nonlocal total_processed, total_embedded, total_skipped
+        total_processed += progress_info["processed"]
+        total_embedded = progress_info["total_embedded"]
+        total_skipped = progress_info["total_skipped"]
 
-        embed_kwargs = {"store": store}
-        if batch_size:
-            embed_kwargs["batch_size"] = batch_size
-        collection_obj.embed_multi(tuples(), **embed_kwargs)
+    def tuples() -> Iterable[Tuple[str, Union[bytes, str]]]:
+        for row in rows:
+            values = list(row.values())
+            id: str = prefix + str(values[0])
+            content: Optional[Union[bytes, str]] = None
+            if binary:
+                content = cast(bytes, values[1])
+            else:
+                content = " ".join(v or "" for v in values[1:])
+            if prepend and isinstance(content, str):
+                content = prepend + content
+            yield id, content or ""
+
+    embed_kwargs = {"store": store, "progress_callback": progress_callback}
+    if batch_size:
+        embed_kwargs["batch_size"] = batch_size
+
+    click.echo("Embedding...", err=True)
+    collection_obj.embed_multi(tuples(), **embed_kwargs)
+    click.echo(
+        f"Processed: {total_processed}, Embedded: {total_embedded}, Skipped: {total_skipped}",
+        err=True,
+    )
 
 
 @cli.command()

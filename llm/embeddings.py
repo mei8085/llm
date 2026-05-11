@@ -155,6 +155,7 @@ class Collection:
         entries: Iterable[Tuple[str, Union[str, bytes]]],
         store: bool = False,
         batch_size: int = 100,
+        progress_callback: Optional[callable] = None,
     ) -> None:
         """
         Embed multiple texts and store them in the collection with given IDs.
@@ -163,11 +164,13 @@ class Collection:
             entries (iterable): Iterable of (id: str, text: str) tuples
             store (bool, optional): Whether to store the text in the content column
             batch_size (int, optional): custom maximum batch size to use
+            progress_callback (callable, optional): Callback function for progress updates
         """
         self.embed_multi_with_metadata(
             ((id, value, None) for id, value in entries),
             store=store,
             batch_size=batch_size,
+            progress_callback=progress_callback,
         )
 
     def embed_multi_with_metadata(
@@ -175,6 +178,7 @@ class Collection:
         entries: Iterable[Tuple[str, Union[str, bytes], Optional[Dict[str, Any]]]],
         store: bool = False,
         batch_size: int = 100,
+        progress_callback: Optional[callable] = None,
     ) -> None:
         """
         Embed multiple values along with metadata and store them in the collection with given IDs.
@@ -183,12 +187,16 @@ class Collection:
             entries (iterable): Iterable of (id: str, value: str or bytes, metadata: None or dict)
             store (bool, optional): Whether to store the value in the content or content_blob column
             batch_size (int, optional): custom maximum batch size to use
+            progress_callback (callable, optional): Callback function for progress updates.
+                Takes a dict with keys: 'processed', 'embedded', 'skipped', 'batch_size', 'total_embedded', 'total_skipped'
         """
         import llm
 
         batch_size = min(batch_size, (self.model().batch_size or batch_size))
         iterator = iter(entries)
         collection_id = self.id
+        total_embedded = 0
+        total_skipped = 0
         while True:
             batch = list(islice(iterator, batch_size))
             if not batch:
@@ -196,43 +204,62 @@ class Collection:
             # Calculate hashes first
             items_and_hashes = [(item, self.content_hash(item[1])) for item in batch]
             # Any of those hashes already exist?
-            existing_ids = [
-                row["id"]
+            existing_hashes = set(
+                row["content_hash"]
                 for row in self.db.query(
                     """
-                    select id from embeddings
+                    select content_hash from embeddings
                     where collection_id = ? and content_hash in ({})
                     """.format(",".join("?" for _ in items_and_hashes)),
                     [collection_id]
                     + [item_and_hash[1] for item_and_hash in items_and_hashes],
                 )
-            ]
-            filtered_batch = [item for item in batch if item[0] not in existing_ids]
-            embeddings = list(
-                self.model().embed_multi(item[1] for item in filtered_batch)
             )
-            with self.db.conn:
-                cast(Table, self.db["embeddings"]).insert_all(
-                    (
-                        {
-                            "collection_id": collection_id,
-                            "id": id,
-                            "embedding": llm.encode(embedding),
-                            "content": (
-                                value if (store and isinstance(value, str)) else None
-                            ),
-                            "content_blob": (
-                                value if (store and isinstance(value, bytes)) else None
-                            ),
-                            "content_hash": self.content_hash(value),
-                            "metadata": json.dumps(metadata) if metadata else None,
-                            "updated": int(time.time()),
-                        }
-                        for (embedding, (id, value, metadata)) in zip(
-                            embeddings, filtered_batch
-                        )
-                    ),
-                    replace=True,
+            filtered_batch = [
+                item
+                for item, content_hash in items_and_hashes
+                if content_hash not in existing_hashes
+            ]
+            skipped_in_batch = len(batch) - len(filtered_batch)
+            total_skipped += skipped_in_batch
+            if filtered_batch:
+                embeddings = list(
+                    self.model().embed_multi(item[1] for item in filtered_batch)
+                )
+                with self.db.conn:
+                    cast(Table, self.db["embeddings"]).insert_all(
+                        (
+                            {
+                                "collection_id": collection_id,
+                                "id": id,
+                                "embedding": llm.encode(embedding),
+                                "content": (
+                                    value if (store and isinstance(value, str)) else None
+                                ),
+                                "content_blob": (
+                                    value if (store and isinstance(value, bytes)) else None
+                                ),
+                                "content_hash": self.content_hash(value),
+                                "metadata": json.dumps(metadata) if metadata else None,
+                                "updated": int(time.time()),
+                            }
+                            for (embedding, (id, value, metadata)) in zip(
+                                embeddings, filtered_batch
+                            )
+                        ),
+                        replace=True,
+                    )
+                total_embedded += len(filtered_batch)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "processed": len(batch),
+                        "embedded": len(filtered_batch),
+                        "skipped": skipped_in_batch,
+                        "batch_size": batch_size,
+                        "total_embedded": total_embedded,
+                        "total_skipped": total_skipped,
+                    }
                 )
 
     def similar_by_vector(
