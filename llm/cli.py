@@ -453,25 +453,103 @@ def conversation_option(fn):
     return fn
 
 
-def common_prompt_chat_options(fn):
-    """Common options for both prompt and chat commands."""
-    fn = system_option(fn)
-    fn = model_option(fn)
-    fn = conversation_option(fn)
-    fn = fragments_option(fn)
-    fn = template_option(fn)
-    fn = options_option(fn)
+def database_option(fn):
     click.option(
         "-d",
         "--database",
         type=click.Path(readable=True, dir_okay=False),
         help="Path to log database",
     )(fn)
+    return fn
+
+
+def no_stream_option(fn):
     click.option("--no-stream", is_flag=True, help="Do not stream output")(fn)
+    return fn
+
+
+def no_reasoning_option(fn):
     click.option(
         "-R", "--no-reasoning", is_flag=True, help="Don't display reasoning output"
     )(fn)
+    return fn
+
+
+def key_option(fn):
     click.option("--key", help="API key to use")(fn)
+    return fn
+
+
+def prompt_shared_options(fn):
+    """Shared options for prompt command in the correct original order."""
+    fn = system_option(fn)
+    fn = model_option(fn)
+    fn = database_option(fn)
+    click.option(
+        "queries",
+        "-q",
+        "--query",
+        multiple=True,
+        help="Use first model matching these strings",
+    )(fn)
+    click.option(
+        "attachments",
+        "-a",
+        "--attachment",
+        type=AttachmentType(),
+        multiple=True,
+        help="Attachment path or URL or -",
+    )(fn)
+    click.option(
+        "attachment_types",
+        "--at",
+        "--attachment-type",
+        type=(str, str),
+        multiple=True,
+        callback=attachment_types_callback,
+        help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
+    )(fn)
+    fn = tools_option(fn)
+    fn = options_option(fn)
+    fn = schema_option(fn)
+    click.option(
+        "--schema-multi",
+        help="JSON schema to use for multiple results",
+    )(fn)
+    fn = fragments_option(fn)
+    fn = template_option(fn)
+    fn = no_stream_option(fn)
+    click.option("-n", "--no-log", is_flag=True, help="Don't log to database")(fn)
+    click.option("--log", is_flag=True, help="Log prompt and response to the database")(fn)
+    fn = no_reasoning_option(fn)
+    fn = conversation_option(fn)
+    fn = key_option(fn)
+    click.option("--save", help="Save prompt with this template name")(fn)
+    click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")(fn)
+    click.option("-u", "--usage", is_flag=True, help="Show token usage")(fn)
+    click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")(fn)
+    click.option(
+        "extract_last",
+        "--xl",
+        "--extract-last",
+        is_flag=True,
+        help="Extract last fenced code block",
+    )(fn)
+    return fn
+
+
+def chat_shared_options(fn):
+    """Shared options for chat command in the correct original order."""
+    fn = system_option(fn)
+    fn = model_option(fn)
+    fn = conversation_option(fn)
+    fn = fragments_option(fn)
+    fn = template_option(fn)
+    fn = options_option(fn)
+    fn = database_option(fn)
+    fn = no_stream_option(fn)
+    fn = no_reasoning_option(fn)
+    fn = key_option(fn)
     fn = tools_option(fn)
     return fn
 
@@ -512,76 +590,34 @@ def cli():
 
 @cli.command(name="prompt")
 @click.argument("prompt", required=False)
-@click.option(
-    "queries",
-    "-q",
-    "--query",
-    multiple=True,
-    help="Use first model matching these strings",
-)
-@click.option(
-    "attachments",
-    "-a",
-    "--attachment",
-    type=AttachmentType(),
-    multiple=True,
-    help="Attachment path or URL or -",
-)
-@click.option(
-    "attachment_types",
-    "--at",
-    "--attachment-type",
-    type=(str, str),
-    multiple=True,
-    callback=attachment_types_callback,
-    help="\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg",
-)
-@schema_option
-@click.option(
-    "--schema-multi",
-    help="JSON schema to use for multiple results",
-)
-@common_prompt_chat_options
-@click.option("-n", "--no-log", is_flag=True, help="Don't log to database")
-@click.option("--log", is_flag=True, help="Log prompt and response to the database")
-@click.option("--save", help="Save prompt with this template name")
-@click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")
-@click.option("-u", "--usage", is_flag=True, help="Show token usage")
-@click.option("-x", "--extract", is_flag=True, help="Extract first fenced code block")
-@click.option(
-    "extract_last",
-    "--xl",
-    "--extract-last",
-    is_flag=True,
-    help="Extract last fenced code block",
-)
+@prompt_shared_options
 def prompt(
     prompt,
+    system,
+    model_id,
+    database,
     queries,
     attachments,
     attachment_types,
-    schema_input,
-    schema_multi,
-    system,
-    model_id,
-    _continue,
-    conversation_id,
-    fragments,
-    system_fragments,
-    template,
-    param,
-    options,
-    database,
-    no_stream,
-    no_reasoning,
-    key,
     tools,
     python_tools,
     tools_debug,
     tools_approve,
     chain_limit,
+    options,
+    schema_input,
+    schema_multi,
+    fragments,
+    system_fragments,
+    template,
+    param,
+    no_stream,
     no_log,
     log,
+    no_reasoning,
+    _continue,
+    conversation_id,
+    key,
     save,
     async_,
     usage,
@@ -1011,7 +1047,7 @@ def prompt(
 
 
 @cli.command()
-@common_prompt_chat_options
+@chat_shared_options
 def chat(
     system,
     model_id,
