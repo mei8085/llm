@@ -2,6 +2,7 @@ from .hookspecs import hookimpl
 from .errors import (
     ModelError,
     NeedsKeyException,
+    ResourceLimitExceeded,
 )
 from .models import (
     AsyncConversation,
@@ -18,6 +19,9 @@ from .models import (
     ModelWithAliases,
     Options,
     Prompt,
+    ResourceLimits,
+    ResourceTracker,
+    ResourceUsage,
     Response,
     Tool,
     Toolbox,
@@ -67,6 +71,10 @@ __all__ = [
     "NeedsKeyException",
     "Options",
     "Prompt",
+    "ResourceLimitExceeded",
+    "ResourceLimits",
+    "ResourceTracker",
+    "ResourceUsage",
     "Response",
     "schema_dsl",
     "system",

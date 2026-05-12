@@ -3,7 +3,7 @@ import base64
 from condense_json import condense_json
 from dataclasses import dataclass, field
 import datetime
-from .errors import NeedsKeyException
+from .errors import NeedsKeyException, ResourceLimitExceeded
 import hashlib
 import httpx
 from itertools import islice
@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import time
 from types import MethodType
+from threading import Lock
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,6 +25,7 @@ from typing import (
     List,
     Optional,
     Set,
+    Tuple,
     Union,
     cast,
     get_type_hints,
@@ -57,6 +59,148 @@ class Usage:
     input: Optional[int] = None
     output: Optional[int] = None
     details: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class ResourceLimits:
+    "Resource limits for a plugin or tool."
+
+    http_requests: Optional[int] = None
+    tokens: Optional[int] = None
+    tool_calls: Optional[int] = None
+    execution_time_ms: Optional[int] = None
+
+    def has_any_limit(self) -> bool:
+        return any(
+            getattr(self, field) is not None
+            for field in ("http_requests", "tokens", "tool_calls", "execution_time_ms")
+        )
+
+
+@dataclass
+class ResourceUsage:
+    "Tracks resource usage for a plugin or tool."
+
+    http_requests: int = 0
+    tokens: int = 0
+    tool_calls: int = 0
+    execution_time_ms: int = 0
+
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "http_requests": self.http_requests,
+            "tokens": self.tokens,
+            "tool_calls": self.tool_calls,
+            "execution_time_ms": self.execution_time_ms,
+        }
+
+
+class ResourceTracker:
+    "Thread-safe resource tracker that monitors usage against limits."
+
+    def __init__(self, limits: Optional[ResourceLimits] = None):
+        self._lock = Lock()
+        self._limits = limits or ResourceLimits()
+        self._usage = ResourceUsage()
+        self._alerted: Set[str] = set()
+
+    @property
+    def limits(self) -> ResourceLimits:
+        return self._limits
+
+    @property
+    def usage(self) -> ResourceUsage:
+        with self._lock:
+            return ResourceUsage(**self._usage.to_dict())
+
+    def increment_http_requests(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
+        """
+        Increment HTTP request counter. Returns (exceeded, alert_message).
+        exceeded=True if limit was exceeded, alert_message contains warning if first time exceeding.
+        """
+        with self._lock:
+            self._usage.http_requests += amount
+            limit = self._limits.http_requests
+            usage = self._usage.http_requests
+            if limit is not None and usage > limit:
+                alert_key = "http_requests"
+                if alert_key not in self._alerted:
+                    self._alerted.add(alert_key)
+                    return (
+                        True,
+                        f"HTTP request limit exceeded: {usage} > {limit}",
+                    )
+                return (True, None)
+            return (False, None)
+
+    def increment_tokens(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
+        """Increment token counter. Returns (exceeded, alert_message)."""
+        with self._lock:
+            self._usage.tokens += amount
+            limit = self._limits.tokens
+            usage = self._usage.tokens
+            if limit is not None and usage > limit:
+                alert_key = "tokens"
+                if alert_key not in self._alerted:
+                    self._alerted.add(alert_key)
+                    return (
+                        True,
+                        f"Token limit exceeded: {usage} > {limit}",
+                    )
+                return (True, None)
+            return (False, None)
+
+    def increment_tool_calls(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
+        """Increment tool call counter. Returns (exceeded, alert_message)."""
+        with self._lock:
+            self._usage.tool_calls += amount
+            limit = self._limits.tool_calls
+            usage = self._usage.tool_calls
+            if limit is not None and usage > limit:
+                alert_key = "tool_calls"
+                if alert_key not in self._alerted:
+                    self._alerted.add(alert_key)
+                    return (
+                        True,
+                        f"Tool call limit exceeded: {usage} > {limit}",
+                    )
+                return (True, None)
+            return (False, None)
+
+    def add_execution_time(self, ms: int) -> Tuple[bool, Optional[str]]:
+        """Add execution time. Returns (exceeded, alert_message)."""
+        with self._lock:
+            self._usage.execution_time_ms += ms
+            limit = self._limits.execution_time_ms
+            usage = self._usage.execution_time_ms
+            if limit is not None and usage > limit:
+                alert_key = "execution_time_ms"
+                if alert_key not in self._alerted:
+                    self._alerted.add(alert_key)
+                    return (
+                        True,
+                        f"Execution time limit exceeded: {usage}ms > {limit}ms",
+                    )
+                return (True, None)
+            return (False, None)
+
+    def check_pre_call(self) -> Optional[str]:
+        """
+        Check if limits are already exceeded before making a call.
+        Returns a message if limits are exceeded, None otherwise.
+        """
+        with self._lock:
+            checks = [
+                ("tool_calls", self._usage.tool_calls, self._limits.tool_calls),
+            ]
+            for name, usage, limit in checks:
+                if limit is not None and usage >= limit:
+                    return f"Pre-call limit check failed: {name} already at limit ({usage} >= {limit})"
+            return None
+
+    def clear_alerts(self) -> None:
+        with self._lock:
+            self._alerted.clear()
 
 
 @dataclass
@@ -145,10 +289,15 @@ class Tool:
     input_schema: Dict = field(default_factory=dict)
     implementation: Optional[Callable] = None
     plugin: Optional[str] = None  # plugin tool came from, e.g. 'llm_tools_sqlite'
+    resource_limits: Optional[ResourceLimits] = None
+    resource_tracker: Optional[ResourceTracker] = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self):
-        # Convert Pydantic model to JSON schema if needed
         self.input_schema = _ensure_dict_schema(self.input_schema)
+        if self.resource_limits is not None and self.resource_limits.has_any_limit():
+            self.resource_tracker = ResourceTracker(self.resource_limits)
 
     def hash(self):
         """Hash for tool based on its name, description and input schema (preserving key order)"""
@@ -162,7 +311,7 @@ class Tool:
         return hashlib.sha256(json.dumps(to_hash).encode("utf-8")).hexdigest()
 
     @classmethod
-    def function(cls, function, name=None, description=None):
+    def function(cls, function, name=None, description=None, resource_limits=None):
         """
         Turn a Python function into a Tool object by:
          - Extracting the function name
@@ -180,6 +329,7 @@ class Tool:
             description=description or function.__doc__ or None,
             input_schema=_get_arguments_input_schema(function, name),
             implementation=function,
+            resource_limits=resource_limits,
         )
 
 
@@ -1725,11 +1875,11 @@ class Response(_BaseResponse):
         *,
         before_call: Optional[BeforeCallSync] = None,
         after_call: Optional[AfterCallSync] = None,
+        alert_logger: Optional[Callable[[str, Tool], None]] = None,
     ) -> List[ToolResult]:
         tool_results = []
         tools_by_name = {tool.name: tool for tool in self.prompt.tools}
 
-        # Run prepare() on all Toolbox instances that need it
         instances_to_prepare: list[Toolbox] = []
         for tool_to_prep in tools_by_name.values():
             inst = _get_instance(tool_to_prep.implementation)
@@ -1742,8 +1892,21 @@ class Response(_BaseResponse):
 
         for tool_call in self.tool_calls():
             tool: Optional[Tool] = tools_by_name.get(tool_call.name)
-            # Tool could be None if the tool was not found in the prompt tools,
-            # but we still call the before_call method:
+            alert_message: Optional[str] = None
+
+            if tool is not None and tool.resource_tracker is not None:
+                pre_check = tool.resource_tracker.check_pre_call()
+                if pre_check is not None:
+                    tool_results.append(
+                        ToolResult(
+                            name=tool_call.name,
+                            output=f"Resource limit reached: {pre_check}",
+                            tool_call_id=tool_call.tool_call_id,
+                            exception=ResourceLimitExceeded(pre_check),
+                        )
+                    )
+                    continue
+
             if before_call:
                 try:
                     cb_result = before_call(tool, tool_call)
@@ -1782,6 +1945,9 @@ class Response(_BaseResponse):
 
             attachments = []
             exception = None
+            result = None
+
+            start_time = time.monotonic()
 
             try:
                 if inspect.iscoroutinefunction(tool.implementation):
@@ -1799,6 +1965,16 @@ class Response(_BaseResponse):
                 result = f"Error: {ex}"
                 exception = ex
 
+            execution_time_ms = int((time.monotonic() - start_time) * 1000)
+
+            if tool.resource_tracker is not None:
+                exceeded, alert = tool.resource_tracker.increment_tool_calls(1)
+                if alert:
+                    alert_message = alert
+                exceeded_time, alert_time = tool.resource_tracker.add_execution_time(execution_time_ms)
+                if alert_time:
+                    alert_message = alert_message or alert_time
+
             tool_result_obj = ToolResult(
                 name=tool_call.name,
                 output=result,
@@ -1807,6 +1983,9 @@ class Response(_BaseResponse):
                 instance=_get_instance(tool.implementation),
                 exception=exception,
             )
+
+            if alert_message and alert_logger is not None:
+                alert_logger(alert_message, tool)
 
             if after_call:
                 cb_result = after_call(tool, tool_call, tool_result_obj)
@@ -2046,11 +2225,11 @@ class AsyncResponse(_BaseResponse):
         *,
         before_call: Optional[BeforeCallAsync] = None,
         after_call: Optional[AfterCallAsync] = None,
+        alert_logger: Optional[Callable[[str, Tool], None]] = None,
     ) -> List[ToolResult]:
         tool_calls_list = await self.tool_calls()
         tools_by_name = {tool.name: tool for tool in self.prompt.tools}
 
-        # Run async prepare_async() on all Toolbox instances that need it
         instances_to_prepare: list[Toolbox] = []
         for tool_to_prep in tools_by_name.values():
             inst = _get_instance(tool_to_prep.implementation)
@@ -2068,6 +2247,24 @@ class AsyncResponse(_BaseResponse):
 
         for idx, tc in enumerate(tool_calls_list):
             tool: Optional[Tool] = tools_by_name.get(tc.name)
+            alert_message: Optional[str] = None
+
+            if tool is not None and tool.resource_tracker is not None:
+                pre_check = tool.resource_tracker.check_pre_call()
+                if pre_check is not None:
+                    indexed_results.append(
+                        (
+                            idx,
+                            ToolResult(
+                                name=tc.name,
+                                output=f"Resource limit reached: {pre_check}",
+                                tool_call_id=tc.tool_call_id,
+                                exception=ResourceLimitExceeded(pre_check),
+                            ),
+                        )
+                    )
+                    continue
+
             exception: Optional[Exception] = None
 
             if tool is None:
@@ -2079,7 +2276,7 @@ class AsyncResponse(_BaseResponse):
             elif inspect.iscoroutinefunction(tool.implementation):
 
                 async def run_async(tc=tc, tool=tool, idx=idx):
-                    # before_call inside the task
+                    alert_msg: Optional[str] = None
                     if before_call:
                         try:
                             cb = before_call(tool, tc)
@@ -2096,6 +2293,8 @@ class AsyncResponse(_BaseResponse):
                     exception = None
                     attachments = []
 
+                    start_time = time.monotonic()
+
                     try:
                         result = await tool.implementation(**tc.arguments)
                         if isinstance(result, ToolOutput):
@@ -2110,6 +2309,16 @@ class AsyncResponse(_BaseResponse):
                         output = f"Error: {ex}"
                         exception = ex
 
+                    execution_time_ms = int((time.monotonic() - start_time) * 1000)
+
+                    if tool.resource_tracker is not None:
+                        exceeded, alert = tool.resource_tracker.increment_tool_calls(1)
+                        if alert:
+                            alert_msg = alert
+                        exceeded_time, alert_time = tool.resource_tracker.add_execution_time(execution_time_ms)
+                        if alert_time:
+                            alert_msg = alert_msg or alert_time
+
                     tr = ToolResult(
                         name=tc.name,
                         output=output,
@@ -2119,7 +2328,9 @@ class AsyncResponse(_BaseResponse):
                         exception=exception,
                     )
 
-                    # after_call inside the task
+                    if alert_msg and alert_logger is not None:
+                        alert_logger(alert_msg, tool)
+
                     if tool is not None and after_call:
                         cb2 = after_call(tool, tc, tr)
                         if inspect.isawaitable(cb2):
@@ -2130,7 +2341,6 @@ class AsyncResponse(_BaseResponse):
                 async_tasks.append(asyncio.create_task(run_async()))
 
             else:
-                # Sync implementation: do hooks and call inline
                 if before_call:
                     try:
                         cb = before_call(tool, tc)
@@ -2157,6 +2367,7 @@ class AsyncResponse(_BaseResponse):
                     output = f'Error: tool "{tc.name}" does not exist'
                     exception = KeyError(tc.name)
                 else:
+                    start_time = time.monotonic()
                     try:
                         res = tool.implementation(**tc.arguments)
                         if inspect.isawaitable(res):
@@ -2173,6 +2384,16 @@ class AsyncResponse(_BaseResponse):
                         output = f"Error: {ex}"
                         exception = ex
 
+                    execution_time_ms = int((time.monotonic() - start_time) * 1000)
+
+                    if tool.resource_tracker is not None:
+                        exceeded, alert = tool.resource_tracker.increment_tool_calls(1)
+                        if alert:
+                            alert_message = alert
+                        exceeded_time, alert_time = tool.resource_tracker.add_execution_time(execution_time_ms)
+                        if alert_time:
+                            alert_message = alert_message or alert_time
+
                     tr = ToolResult(
                         name=tc.name,
                         output=output,
@@ -2182,6 +2403,9 @@ class AsyncResponse(_BaseResponse):
                         exception=exception,
                     )
 
+                    if alert_message and alert_logger is not None:
+                        alert_logger(alert_message, tool)
+
                     if tool is not None and after_call:
                         cb2 = after_call(tool, tc, tr)
                         if inspect.isawaitable(cb2):
@@ -2189,11 +2413,9 @@ class AsyncResponse(_BaseResponse):
 
                     indexed_results.append((idx, tr))
 
-        # Await all async tasks in parallel
         if async_tasks:
             indexed_results.extend(await asyncio.gather(*async_tasks))
 
-        # Reorder by original index
         indexed_results.sort(key=lambda x: x[0])
         return [tr for _, tr in indexed_results]
 
