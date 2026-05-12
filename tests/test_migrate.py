@@ -22,6 +22,7 @@ EXPECTED = {
     "token_details": str,
     "schema_id": str,
     "reasoning": str,
+    "parent_response_id": str,
 }
 
 
@@ -39,6 +40,12 @@ def test_migrate_blank():
             table="responses",
             column="conversation_id",
             other_table="conversations",
+            other_column="id",
+        ),
+        sqlite_utils.db.ForeignKey(
+            table="responses",
+            column="parent_response_id",
+            other_table="responses",
             other_column="id",
         ),
     ):

@@ -1483,6 +1483,7 @@ LOGS_COLUMNS = """    responses.id,
     responses.reasoning,
     responses.response_json,
     responses.conversation_id,
+    responses.parent_response_id,
     responses.duration_ms,
     responses.datetime_utc,
     responses.input_tokens,
@@ -2064,6 +2065,8 @@ def logs_list(
                     "datetime": row["datetime_utc"].split(".")[0],
                     "conversation": cid,
                 }
+                if row["parent_response_id"]:
+                    obj["parent_response"] = row["parent_response_id"]
                 if row["tool_calls"]:
                     obj["tool_calls"] = [
                         "{}({})".format(
@@ -2105,8 +2108,13 @@ def logs_list(
                 click.echo(yaml.dump([obj], sort_keys=False).strip())
                 continue
             # Not short, output Markdown
+            fork_info = ""
+            if row["parent_response_id"]:
+                fork_info = "    (forked from response: {})".format(
+                    row["parent_response_id"]
+                )
             click.echo(
-                "# {}{}\n{}".format(
+                "# {}{}{}\n{}".format(
                     row["datetime_utc"].split(".")[0],
                     (
                         "    conversation: {} id: {}".format(
@@ -2115,6 +2123,7 @@ def logs_list(
                         if should_show_conversation
                         else ""
                     ),
+                    fork_info,
                     (
                         (
                             "\nModel: **{}**{}\n".format(

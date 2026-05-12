@@ -426,3 +426,14 @@ def m022_response_reasoning(db):
     # NULL/empty when no reasoning was emitted or when the provider
     # only reported an opaque token count (the redacted-marker case).
     db["responses"].add_column("reasoning", str)
+
+
+@migration
+def m023_fork_parent_response(db):
+    # Support for forking conversations from specific responses
+    # responses.parent_response_id points to the response this was forked from
+    db["responses"].add_column("parent_response_id", str, fk="responses", fk_col="id")
+    # Adding a foreign key may have dropped FTS triggers, re-enable them
+    db["responses"].enable_fts(
+        ["prompt", "response"], create_triggers=True, replace=True
+    )

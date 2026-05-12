@@ -504,10 +504,34 @@ class _BaseConversation:
     responses: List["_BaseResponse"] = field(default_factory=list)
     tools: Optional[List[ToolDef]] = None
     chain_limit: Optional[int] = None
+    parent_response_id: Optional[str] = None
 
     @classmethod
     @abstractmethod
     def from_row(cls, row: Any) -> "_BaseConversation":
+        raise NotImplementedError
+
+    def fork(self, response: "_BaseResponse") -> "_BaseConversation":
+        """Create a new conversation forked from a specific response.
+
+        The forked conversation will inherit the history up to and including
+        the given response, and will create a new conversation ID. Any new
+        responses created from this forked conversation will have
+        parent_response_id pointing back to the response where the fork
+        occurred.
+        """
+        if response not in self.responses:
+            raise ValueError("Response is not part of this conversation")
+        response_index = self.responses.index(response)
+        responses_upto = list(self.responses[: response_index + 1])
+        last_response = responses_upto[-1] if responses_upto else None
+        forked = self._clone()
+        forked.responses = responses_upto
+        forked.parent_response_id = last_response.id if last_response else None
+        return forked
+
+    @abstractmethod
+    def _clone(self) -> "_BaseConversation":
         raise NotImplementedError
 
     def _build_full_chain(
@@ -581,6 +605,16 @@ class Conversation(_BaseConversation):
     before_call: Optional[BeforeCallSync] = None
     after_call: Optional[AfterCallSync] = None
 
+    def _clone(self) -> "Conversation":
+        return Conversation(
+            model=self.model,
+            name=self.name,
+            tools=self.tools,
+            chain_limit=self.chain_limit,
+            before_call=self.before_call,
+            after_call=self.after_call,
+        )
+
     def prompt(
         self,
         prompt: Optional[str] = None,
@@ -607,6 +641,7 @@ class Conversation(_BaseConversation):
             tool_results=tool_results,
             explicit_messages=messages,
         )
+        parent_response_id = self.parent_response_id
         return Response(
             Prompt(
                 prompt,
@@ -625,6 +660,7 @@ class Conversation(_BaseConversation):
             stream,
             conversation=self,
             key=key,
+            parent_response_id=parent_response_id,
         )
 
     def chain(
@@ -657,6 +693,7 @@ class Conversation(_BaseConversation):
             tool_results=tool_results,
             explicit_messages=messages,
         )
+        parent_response_id = self.parent_response_id
         return ChainResponse(
             Prompt(
                 prompt,
@@ -678,6 +715,7 @@ class Conversation(_BaseConversation):
             before_call=before_call or self.before_call,
             after_call=after_call or self.after_call,
             chain_limit=chain_limit if chain_limit is not None else self.chain_limit,
+            parent_response_id=parent_response_id,
         )
 
     @classmethod
@@ -700,6 +738,16 @@ class Conversation(_BaseConversation):
 class AsyncConversation(_BaseConversation):
     before_call: Optional[BeforeCallAsync] = None
     after_call: Optional[AfterCallAsync] = None
+
+    def _clone(self) -> "AsyncConversation":
+        return AsyncConversation(
+            model=self.model,
+            name=self.name,
+            tools=self.tools,
+            chain_limit=self.chain_limit,
+            before_call=self.before_call,
+            after_call=self.after_call,
+        )
 
     def chain(
         self,
@@ -727,6 +775,7 @@ class AsyncConversation(_BaseConversation):
             tool_results=tool_results,
             explicit_messages=messages,
         )
+        parent_response_id = self.parent_response_id
         return AsyncChainResponse(
             Prompt(
                 prompt,
@@ -748,6 +797,7 @@ class AsyncConversation(_BaseConversation):
             before_call=before_call or self.before_call,
             after_call=after_call or self.after_call,
             chain_limit=chain_limit if chain_limit is not None else self.chain_limit,
+            parent_response_id=parent_response_id,
         )
 
     def prompt(
@@ -774,6 +824,7 @@ class AsyncConversation(_BaseConversation):
             tool_results=tool_results,
             explicit_messages=messages,
         )
+        parent_response_id = self.parent_response_id
         return AsyncResponse(
             Prompt(
                 prompt,
@@ -792,6 +843,7 @@ class AsyncConversation(_BaseConversation):
             stream,
             conversation=self,
             key=key,
+            parent_response_id=parent_response_id,
         )
 
     def to_sync_conversation(self):
@@ -850,6 +902,7 @@ class _BaseResponse:
     conversation: Optional["_BaseConversation"] = None
     _key: Optional[str] = None
     _tool_calls: List[ToolCall] = []
+    parent_response_id: Optional[str] = None
 
     def __init__(
         self,
@@ -858,6 +911,7 @@ class _BaseResponse:
         stream: bool,
         conversation: Optional[_BaseConversation] = None,
         key: Optional[str] = None,
+        parent_response_id: Optional[str] = None,
     ):
         self.id = str(monotonic_ulid()).lower()
         self.prompt = prompt
@@ -897,6 +951,7 @@ class _BaseResponse:
         self.output_tokens: Optional[int] = None
         self.token_details: Optional[dict] = None
         self.done_callbacks: List[Callable] = []
+        self.parent_response_id = parent_response_id
 
         if self.prompt.schema and not self.model.supports_schema:
             raise ValueError(f"{self.model} does not support schemas")
@@ -1393,6 +1448,7 @@ class _BaseResponse:
             ),
             "schema_id": schema_id,
             "resolved_model": self.resolved_model,
+            "parent_response_id": self.parent_response_id,
         }
         db["responses"].insert(response)
 
@@ -2465,6 +2521,7 @@ class _BaseChainResponse:
     stream: bool
     conversation: Optional["_BaseConversation"] = None
     _key: Optional[str] = None
+    parent_response_id: Optional[str] = None
 
     def __init__(
         self,
@@ -2476,6 +2533,7 @@ class _BaseChainResponse:
         chain_limit: Optional[int] = 10,
         before_call: Optional[Union[BeforeCallSync, BeforeCallAsync]] = None,
         after_call: Optional[Union[AfterCallSync, AfterCallAsync]] = None,
+        parent_response_id: Optional[str] = None,
     ):
         self.prompt = prompt
         self.model = model
@@ -2486,6 +2544,7 @@ class _BaseChainResponse:
         self.chain_limit = chain_limit
         self.before_call = before_call
         self.after_call = after_call
+        self.parent_response_id = parent_response_id
 
     def log_to_db(self, db):
         for response in self._responses:
@@ -2512,6 +2571,7 @@ class ChainResponse(_BaseChainResponse):
             self.stream,
             key=self._key,
             conversation=self.conversation,
+            parent_response_id=self.parent_response_id,
         )
         while current_response:
             count += 1
@@ -2556,6 +2616,7 @@ class ChainResponse(_BaseChainResponse):
                     stream=self.stream,
                     key=self._key,
                     conversation=self.conversation,
+                    parent_response_id=self.parent_response_id,
                 )
             else:
                 current_response = None
@@ -2588,6 +2649,7 @@ class AsyncChainResponse(_BaseChainResponse):
             self.stream,
             key=self._key,
             conversation=self.conversation,
+            parent_response_id=self.parent_response_id,
         )
         while current_response:
             count += 1
@@ -2629,6 +2691,7 @@ class AsyncChainResponse(_BaseChainResponse):
                     stream=self.stream,
                     key=self._key,
                     conversation=self.conversation,
+                    parent_response_id=self.parent_response_id,
                 )
             else:
                 current_response = None
