@@ -577,3 +577,99 @@ def test_logs_markdown_includes_parent_conversation(user_path):
     assert "from conversation" in output
     assert "Original" in output
     assert conv1_id in output
+
+
+def test_chat_fork_from_response_id(user_path):
+    log_path = str(user_path / "chat_fork.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    conv1_id = "conv1"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original Chat", "model": "echo"},
+        ]
+    )
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+    response1_id = str(monotonic_ulid()).lower()
+    response2_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "echo",
+                "prompt": "first message",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "FIRST RESPONSE",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response2_id,
+                "model": "echo",
+                "prompt": "second message",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "SECOND RESPONSE",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=1)).isoformat(),
+                "parent_response_id": None,
+            },
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["chat", "--fork", response1_id, "-d", log_path, "-m", "echo"],
+        input="forked chat message\nquit\n",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    forked_responses = list(
+        db["responses"].rows_where("parent_response_id = ?", [response1_id])
+    )
+    assert len(forked_responses) == 1
+    assert forked_responses[0]["prompt"] == "forked chat message"
+
+    forked_conversation_id = forked_responses[0]["conversation_id"]
+    assert forked_conversation_id != conv1_id
+
+    forked_conversation = db["conversations"].get(forked_conversation_id)
+    assert forked_conversation is not None
+
+
+def test_chat_fork_with_continue_raises_error(user_path):
+    log_path = str(user_path / "chat_fork_error.db")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["chat", "--fork", "some-id", "-c", "-m", "echo"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--fork cannot be used with" in str(result.output)
+
+
+def test_chat_fork_with_cid_raises_error(user_path):
+    log_path = str(user_path / "chat_fork_cid_error.db")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["chat", "--fork", "some-id", "--cid", "conv1", "-m", "echo"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--fork cannot be used with" in str(result.output)

@@ -364,6 +364,37 @@ llm 'More names' --cid 01h53zma5txeby33t1kbe3xk8q
 ```
 You can find these conversation IDs using the `llm logs` command.
 
+(usage-fork-conversation)=
+### Forking a conversation
+
+If you want to explore an alternative path of conversation from a specific point in history, you can **fork** a new conversation from a specific response ID.
+
+This is useful when you want to try a different approach or ask a follow-up question based on a specific point in the conversation, without affecting the original conversation thread.
+
+Use the `--fork <response_id>` option with either `llm prompt` or `llm chat`:
+
+```bash
+llm 'Alternative approach' --fork 01h53zma5txeby33t1kbe3xk8q
+```
+
+Or start an interactive chat from the fork point:
+
+```bash
+llm chat --fork 01h53zma5txeby33t1kbe3xk8q
+```
+
+You can find response IDs using `llm logs --json` which shows the `id` field for each response.
+
+When you fork a conversation:
+
+- A new conversation is created with a new ID
+- The original conversation remains unchanged
+- The forked conversation starts from the specified response, with all prior context preserved
+- The new response will have a `parent_response_id` pointing back to the original response
+- You can see the fork relationship in the logs with `llm logs`
+
+The `--fork` option cannot be used together with `--continue` or `--cid`.
+
 ### Tips for using LLM with Bash or Zsh
 
 To learn more about your computer's operating system based on the output of `uname -a`, run this:
@@ -405,6 +436,14 @@ You can pass `-c` to start a conversation as a continuation of your most recent 
 ```bash
 llm chat -c
 ```
+
+You can also fork a new conversation from a specific response in history using `--fork <response_id>`. This creates a new conversation branch without modifying the original:
+
+```bash
+llm chat --fork 01h53zma5txeby33t1kbe3xk8q
+```
+
+For more details on forking, see {ref}`Forking a conversation <usage-fork-conversation>`.
 
 For models that support them, you can pass options using `-o/--option`:
 ```bash

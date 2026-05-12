@@ -112,8 +112,51 @@ Example output:
 ]
 ```
 
-(logging-short)=
+(logging-fork-info)=
+### Viewing fork information in logs
 
+When a response was created by {ref}`forking a conversation <usage-fork-conversation>` (using `--fork`), the logs will display the fork relationship.
+
+In JSON mode, forked responses include:
+
+- `parent_response_id` - the ID of the response from which this response was forked
+- `parent_conversation_id` - the ID of the conversation that contained the parent response
+- `parent_conversation_name` - the name of the parent conversation
+
+```json
+[
+  {
+    "id": "01jm8ec74wxsdatyn5pq1fp0s6",
+    "model": "anthropic/claude-3-haiku-20240307",
+    "prompt": "Alternative approach",
+    "response": "Here's a different approach...",
+    "conversation_id": "01jm8ec74taftdgj2t4zra9z0k",
+    "conversation_name": "Forked conversation",
+    "parent_response_id": "01jm8ec74wxsdatyn5pq1fp0s5",
+    "parent_conversation_id": "01jm8ec74taftdgj2t4zra9z0j",
+    "parent_conversation_name": "Original conversation"
+  }
+]
+```
+
+In `-s/--short mode:
+
+```yaml
+- model: gpt-4o-mini
+  datetime: '2025-02-16T22:34:30'
+  conversation: forked_conversation_id
+  parent_response: 01jm8ec74wxsdatyn5pq1fp0s5
+  parent_conversation: Original conversation (01jm8ec74taftdgj2t4zra9z0j)
+  prompt: Alternative approach
+```
+
+In the default Markdown mode:
+
+```markdown
+# 2025-02-16T22:34:30    conversation: forked_conversation_id id: response_id    (forked from response: parent_response_id from conversation Original conversation (parent_conversation_id))
+```
+
+(logging-short)=
 ### -s/--short mode
 
 Use `-s/--short` to see a shortened YAML log with truncated prompts and no responses:
