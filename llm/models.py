@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import click
 from condense_json import condense_json
 from dataclasses import dataclass, field
 import datetime
@@ -7,8 +8,10 @@ from .errors import NeedsKeyException, ResourceLimitExceeded
 import hashlib
 import httpx
 from itertools import islice
+import os
 from pathlib import Path
 import re
+import sqlite_utils
 import time
 from types import MethodType
 from threading import Lock
@@ -113,11 +116,28 @@ class ResourceTracker:
         with self._lock:
             return ResourceUsage(**self._usage.to_dict())
 
+    def can_consume_http_requests(self, amount: int = 1) -> bool:
+        with self._lock:
+            limit = self._limits.http_requests
+            if limit is None:
+                return True
+            return self._usage.http_requests + amount <= limit
+
+    def can_consume_tokens(self, amount: int = 1) -> bool:
+        with self._lock:
+            limit = self._limits.tokens
+            if limit is None:
+                return True
+            return self._usage.tokens + amount <= limit
+
+    def can_consume_tool_calls(self, amount: int = 1) -> bool:
+        with self._lock:
+            limit = self._limits.tool_calls
+            if limit is None:
+                return True
+            return self._usage.tool_calls + amount <= limit
+
     def increment_http_requests(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
-        """
-        Increment HTTP request counter. Returns (exceeded, alert_message).
-        exceeded=True if limit was exceeded, alert_message contains warning if first time exceeding.
-        """
         with self._lock:
             self._usage.http_requests += amount
             limit = self._limits.http_requests
@@ -134,7 +154,6 @@ class ResourceTracker:
             return (False, None)
 
     def increment_tokens(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
-        """Increment token counter. Returns (exceeded, alert_message)."""
         with self._lock:
             self._usage.tokens += amount
             limit = self._limits.tokens
@@ -151,7 +170,6 @@ class ResourceTracker:
             return (False, None)
 
     def increment_tool_calls(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
-        """Increment tool call counter. Returns (exceeded, alert_message)."""
         with self._lock:
             self._usage.tool_calls += amount
             limit = self._limits.tool_calls
@@ -168,7 +186,6 @@ class ResourceTracker:
             return (False, None)
 
     def add_execution_time(self, ms: int) -> Tuple[bool, Optional[str]]:
-        """Add execution time. Returns (exceeded, alert_message)."""
         with self._lock:
             self._usage.execution_time_ms += ms
             limit = self._limits.execution_time_ms
@@ -185,13 +202,11 @@ class ResourceTracker:
             return (False, None)
 
     def check_pre_call(self) -> Optional[str]:
-        """
-        Check if limits are already exceeded before making a call.
-        Returns a message if limits are exceeded, None otherwise.
-        """
         with self._lock:
             checks = [
                 ("tool_calls", self._usage.tool_calls, self._limits.tool_calls),
+                ("http_requests", self._usage.http_requests, self._limits.http_requests),
+                ("tokens", self._usage.tokens, self._limits.tokens),
             ]
             for name, usage, limit in checks:
                 if limit is not None and usage >= limit:
@@ -310,6 +325,40 @@ class Tool:
             to_hash["plugin"] = self.plugin
         return hashlib.sha256(json.dumps(to_hash).encode("utf-8")).hexdigest()
 
+    def report_http_requests(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
+        """
+        Report HTTP request usage for this tool.
+        Returns (exceeded, alert_message):
+        - exceeded: True if limit was exceeded by this request
+        - alert_message: Alert message if first time exceeding this limit type
+        """
+        if self.resource_tracker is None:
+            return (False, None)
+        return self.resource_tracker.increment_http_requests(amount)
+
+    def report_tokens(self, amount: int = 1) -> Tuple[bool, Optional[str]]:
+        """
+        Report token usage for this tool.
+        Returns (exceeded, alert_message):
+        - exceeded: True if limit was exceeded by this request
+        - alert_message: Alert message if first time exceeding this limit type
+        """
+        if self.resource_tracker is None:
+            return (False, None)
+        return self.resource_tracker.increment_tokens(amount)
+
+    def can_make_http_request(self, amount: int = 1) -> bool:
+        """Check if the tool can make HTTP requests within its limits."""
+        if self.resource_tracker is None:
+            return True
+        return self.resource_tracker.can_consume_http_requests(amount)
+
+    def can_use_tokens(self, amount: int = 1) -> bool:
+        """Check if the tool can consume tokens within its limits."""
+        if self.resource_tracker is None:
+            return True
+        return self.resource_tracker.can_consume_tokens(amount)
+
     @classmethod
     def function(cls, function, name=None, description=None, resource_limits=None):
         """
@@ -350,6 +399,86 @@ def _get_arguments_input_schema(function, name):
             fields[param_name] = (annotated_type, param.default)
 
     return create_model(f"{name}InputSchema", **fields)
+
+
+def _get_user_dir() -> Path:
+    llm_user_path = os.environ.get("LLM_USER_PATH")
+    if llm_user_path:
+        path = Path(llm_user_path)
+    else:
+        path = Path(click.get_app_dir("io.datasette.llm"))
+    path.mkdir(exist_ok=True, parents=True)
+    return path
+
+
+def _get_logs_db_path() -> Path:
+    return _get_user_dir() / "logs.db"
+
+
+def _get_logs_db():
+    from .migrations import migrate
+
+    db_path = _get_logs_db_path()
+    db = sqlite_utils.Database(db_path)
+    migrate(db)
+    return db
+
+
+def log_resource_alert(
+    tool_name: str,
+    message: str,
+    resource_type: str,
+    tool_plugin: Optional[str] = None,
+    limit_value: Optional[int] = None,
+    usage_value: Optional[int] = None,
+) -> None:
+    """Log a resource limit exceeded alert to the database."""
+    try:
+        db = _get_logs_db()
+        db["resource_alerts"].insert(
+            {
+                "tool_name": tool_name,
+                "tool_plugin": tool_plugin,
+                "resource_type": resource_type,
+                "limit_value": limit_value,
+                "usage_value": usage_value,
+                "message": message,
+                "datetime_utc": str(datetime.datetime.now(datetime.timezone.utc)),
+            }
+        )
+    except Exception:
+        pass
+
+
+def default_alert_logger(message: str, tool: Tool) -> None:
+    """Default alert logger that writes alerts to the database."""
+    resource_type = "unknown"
+    if "HTTP" in message:
+        resource_type = "http_requests"
+    elif "Token" in message:
+        resource_type = "tokens"
+    elif "Tool call" in message:
+        resource_type = "tool_calls"
+    elif "Execution time" in message:
+        resource_type = "execution_time_ms"
+
+    limit_value = None
+    usage_value = None
+    import re
+
+    match = re.search(r"(\d+)(?:ms)? > (\d+)(?:ms)?", message)
+    if match:
+        usage_value = int(match.group(1))
+        limit_value = int(match.group(2))
+
+    log_resource_alert(
+        tool_name=tool.name,
+        tool_plugin=tool.plugin,
+        message=message,
+        resource_type=resource_type,
+        limit_value=limit_value,
+        usage_value=usage_value,
+    )
 
 
 class Toolbox:
@@ -1877,6 +2006,8 @@ class Response(_BaseResponse):
         after_call: Optional[AfterCallSync] = None,
         alert_logger: Optional[Callable[[str, Tool], None]] = None,
     ) -> List[ToolResult]:
+        if alert_logger is None:
+            alert_logger = default_alert_logger
         tool_results = []
         tools_by_name = {tool.name: tool for tool in self.prompt.tools}
 
@@ -2227,6 +2358,8 @@ class AsyncResponse(_BaseResponse):
         after_call: Optional[AfterCallAsync] = None,
         alert_logger: Optional[Callable[[str, Tool], None]] = None,
     ) -> List[ToolResult]:
+        if alert_logger is None:
+            alert_logger = default_alert_logger
         tool_calls_list = await self.tool_calls()
         tools_by_name = {tool.name: tool for tool in self.prompt.tools}
 

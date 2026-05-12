@@ -426,3 +426,23 @@ def m022_response_reasoning(db):
     # NULL/empty when no reasoning was emitted or when the provider
     # only reported an opaque token count (the redacted-marker case).
     db["responses"].add_column("reasoning", str)
+
+
+@migration
+def m023_resource_alerts(db):
+    db["resource_alerts"].create(
+        {
+            "id": int,
+            "tool_name": str,
+            "tool_plugin": str,
+            "resource_type": str,
+            "limit_value": int,
+            "usage_value": int,
+            "message": str,
+            "datetime_utc": str,
+        },
+        pk="id",
+    )
+    db["resource_alerts"].create_index(["tool_name"])
+    db["resource_alerts"].create_index(["resource_type"])
+    db["resource_alerts"].create_index(["datetime_utc"])

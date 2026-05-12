@@ -29,6 +29,8 @@ from .models import (
     ToolOutput,
     ToolResult,
     Usage,
+    default_alert_logger,
+    log_resource_alert,
 )
 from .parts import (
     Message,
@@ -59,12 +61,14 @@ __all__ = [
     "CancelToolCall",
     "Collection",
     "Conversation",
+    "default_alert_logger",
     "Fragment",
     "get_async_model",
     "get_key",
     "get_model",
     "hookimpl",
     "KeyModel",
+    "log_resource_alert",
     "Message",
     "Model",
     "ModelError",
