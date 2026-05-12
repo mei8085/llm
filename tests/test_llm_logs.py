@@ -1127,6 +1127,100 @@ def test_logs_filter_model(user_path, filter_dsl, expected_models, description):
     assert actual_models == expected_models, f"Test failed: {description}"
 
 
+def test_logs_filter_model_exact_equals(user_path):
+    """Test model filtering with explicit equals operator.
+    
+    model:=value and model=value should use exact match (=), not LIKE.
+    """
+    log_path = str(user_path / "logs_filter_model_exact.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    start = datetime.datetime.now(datetime.timezone.utc)
+    
+    models = ["gpt-4", "gpt-3.5", "openai-gpt-4", "openai-gpt-3.5", "anthropic-claude"]
+    for i, model in enumerate(models):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": model,
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": f"conv_{i}",
+                "input_tokens": 10 + i,
+                "output_tokens": 20 + i,
+            }
+        )
+    
+    runner = CliRunner()
+    
+    # Test model:=value syntax (exact match)
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "model:=gpt-4"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    actual_models = [log["model"] for log in logs]
+    assert actual_models == ["gpt-4"], f"Test failed: model:=gpt-4 should match only gpt-4, not openai-gpt-4"
+    
+    # Test model=value syntax (exact match)
+    result2 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "model=gpt-3.5"],
+        catch_exceptions=False
+    )
+    assert result2.exit_code == 0
+    logs2 = json.loads(result2.output)
+    actual_models2 = [log["model"] for log in logs2]
+    assert actual_models2 == ["gpt-3.5"], f"Test failed: model=gpt-3.5 should match only gpt-3.5"
+    
+    # Test value containing equals sign
+    log_path2 = str(user_path / "logs_filter_model_equals_value.db")
+    db2 = sqlite_utils.Database(log_path2)
+    migrate(db2)
+    
+    models_with_equals = ["model=a=b", "model=c=d", "model=simple"]
+    for i, model in enumerate(models_with_equals):
+        db2["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": model,
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": f"conv_{i}",
+                "input_tokens": 10 + i,
+                "output_tokens": 20 + i,
+            }
+        )
+    
+    # Test model:= with value containing equals
+    result3 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path2, "-n", "0", "--json", "--filter", "model:=model=a=b"],
+        catch_exceptions=False
+    )
+    assert result3.exit_code == 0
+    logs3 = json.loads(result3.output)
+    assert len(logs3) == 1
+    assert logs3[0]["model"] == "model=a=b", f"Test failed: model:=model=a=b should match exactly"
+    
+    # Test model= with value containing equals
+    result4 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path2, "-n", "0", "--json", "--filter", "model=model=c=d"],
+        catch_exceptions=False
+    )
+    assert result4.exit_code == 0
+    logs4 = json.loads(result4.output)
+    assert len(logs4) == 1
+    assert logs4[0]["model"] == "model=c=d", f"Test failed: model=model=c=d should match exactly"
+
+
 def test_logs_filter_date_exact(user_path):
     """Test date filtering with exact month."""
     log_path = str(user_path / "logs_filter_date.db")
@@ -1349,6 +1443,218 @@ def test_logs_filter_conversation(user_path):
     logs = json.loads(result.output)
     assert len(logs) == 2
     assert all(log["conversation_id"] == "conv_abc" for log in logs)
+
+
+def test_logs_filter_date_conversation_exact_equals(user_path):
+    """Test date and conversation filtering with explicit equals operator."""
+    log_path = str(user_path / "logs_filter_date_conv_exact.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    
+    # Create logs with specific dates and conversations
+    test_data = [
+        {"date": "2026-01-15T10:00:00", "conv": "conv_abc"},
+        {"date": "2026-01-15T10:00:00", "conv": "conv_xyz"},
+        {"date": "2026-01-16T09:00:00", "conv": "conv_abc"},
+        {"date": "2026-02-01T12:00:00", "conv": "conv_123"},
+    ]
+    
+    for i, data in enumerate(test_data):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": data["date"],
+                "conversation_id": data["conv"],
+            }
+        )
+    
+    runner = CliRunner()
+    
+    # Test date=value syntax (exact match)
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "date=2026-01-15T10:00:00"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 2
+    assert all(log["datetime_utc"] == "2026-01-15T10:00:00" for log in logs)
+    
+    # Test date:=value syntax (exact match)
+    result2 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "date:=2026-01-16T09:00:00"],
+        catch_exceptions=False
+    )
+    assert result2.exit_code == 0
+    logs2 = json.loads(result2.output)
+    assert len(logs2) == 1
+    assert logs2[0]["datetime_utc"] == "2026-01-16T09:00:00"
+    
+    # Test conversation=value syntax (exact match)
+    result3 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "conversation=conv_abc"],
+        catch_exceptions=False
+    )
+    assert result3.exit_code == 0
+    logs3 = json.loads(result3.output)
+    assert len(logs3) == 2
+    assert all(log["conversation_id"] == "conv_abc" for log in logs3)
+    
+    # Test conversation:=value syntax (exact match)
+    result4 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "conversation:=conv_xyz"],
+        catch_exceptions=False
+    )
+    assert result4.exit_code == 0
+    logs4 = json.loads(result4.output)
+    assert len(logs4) == 1
+    assert logs4[0]["conversation_id"] == "conv_xyz"
+    
+    # Test value containing equals sign for conversation
+    log_path2 = str(user_path / "logs_filter_conv_equals_value.db")
+    db2 = sqlite_utils.Database(log_path2)
+    migrate(db2)
+    
+    conv_with_equals = ["conv=a=b", "conv=c=d", "conv=simple"]
+    for i, conv in enumerate(conv_with_equals):
+        db2["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": f"2026-01-0{i+1}T10:00:00",
+                "conversation_id": conv,
+            }
+        )
+    
+    # Test conversation= with value containing equals
+    result5 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path2, "-n", "0", "--json", "--filter", "conversation=conv=a=b"],
+        catch_exceptions=False
+    )
+    assert result5.exit_code == 0
+    logs5 = json.loads(result5.output)
+    assert len(logs5) == 1
+    assert logs5[0]["conversation_id"] == "conv=a=b"
+    
+    # Test conversation:= with value containing equals
+    result6 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path2, "-n", "0", "--json", "--filter", "conversation:=conv=c=d"],
+        catch_exceptions=False
+    )
+    assert result6.exit_code == 0
+    logs6 = json.loads(result6.output)
+    assert len(logs6) == 1
+    assert logs6[0]["conversation_id"] == "conv=c=d"
+
+
+def test_logs_filter_token_usage_exact_equals(user_path):
+    """Test token_usage and input_tokens filtering with explicit equals operator."""
+    log_path = str(user_path / "logs_filter_tokens_exact.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    start = datetime.datetime.now(datetime.timezone.utc)
+    
+    # Create logs with specific token combinations
+    token_combinations = [
+        (10, 20),  # 30 total
+        (15, 25),  # 40 total
+        (20, 15),  # 35 total
+        (10, 30),  # 40 total
+    ]
+    
+    for i, (input_tokens, output_tokens) in enumerate(token_combinations):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": f"conv_{i}",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        )
+    
+    runner = CliRunner()
+    
+    # Test token_usage=value syntax (exact match)
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "token_usage=40"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 2  # Should match both (15,25) and (10,30) which sum to 40
+    
+    # Test token_usage:=value syntax (exact match)
+    result2 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "token_usage:=30"],
+        catch_exceptions=False
+    )
+    assert result2.exit_code == 0
+    logs2 = json.loads(result2.output)
+    assert len(logs2) == 1  # Should match only (10,20) which sums to 30
+    assert logs2[0]["input_tokens"] == 10
+    assert logs2[0]["output_tokens"] == 20
+    
+    # Test input_tokens=value syntax (exact match)
+    result3 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "input_tokens=10"],
+        catch_exceptions=False
+    )
+    assert result3.exit_code == 0
+    logs3 = json.loads(result3.output)
+    assert len(logs3) == 2  # Should match (10,20) and (10,30)
+    
+    # Test input_tokens:=value syntax (exact match)
+    result4 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "input_tokens:=15"],
+        catch_exceptions=False
+    )
+    assert result4.exit_code == 0
+    logs4 = json.loads(result4.output)
+    assert len(logs4) == 1  # Should match only (15,25)
+    assert logs4[0]["input_tokens"] == 15
+    
+    # Test output_tokens=value syntax (exact match)
+    result5 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "output_tokens=20"],
+        catch_exceptions=False
+    )
+    assert result5.exit_code == 0
+    logs5 = json.loads(result5.output)
+    assert len(logs5) == 1  # Should match only (10,20)
+    
+    # Test output_tokens:=value syntax (exact match)
+    result6 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "output_tokens:=15"],
+        catch_exceptions=False
+    )
+    assert result6.exit_code == 0
+    logs6 = json.loads(result6.output)
+    assert len(logs6) == 1  # Should match only (20,15)
+    assert logs6[0]["output_tokens"] == 15
 
 
 def test_logs_filter_combined(user_path):

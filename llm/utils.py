@@ -815,9 +815,14 @@ class FilterDSL:
     @classmethod
     def _parse_token(cls, token: str) -> Optional[Dict[str, Any]]:
         for filter_type, config in cls.FILTER_TYPES.items():
+            # Support both model:value and model=value syntax
             if token.startswith(f"{filter_type}:"):
                 value_part = token[len(filter_type) + 1:]
                 return cls._parse_filter_value(filter_type, value_part, config)
+            elif token.startswith(f"{filter_type}="):
+                # model=value is equivalent to model:=value (exact match)
+                value_part = token[len(filter_type) + 1:]
+                return cls._parse_filter_value(filter_type, f"={value_part}", config)
         
         return None
     
@@ -834,13 +839,18 @@ class FilterDSL:
         # This triggers fuzzy matching for model and date:YYYY-MM
         operator = ":"
         
-        # Handle operators like >, <, >=, <=
-        comparison_operators = [op for op in config.get("operators", ["="]) if op not in [":", "="]]
-        for op in sorted(comparison_operators, key=len, reverse=True):
-            if value.startswith(op):
-                operator = op
-                value = value[len(op):]
-                break
+        # Check for explicit = operator first (handles := and = syntax)
+        if value.startswith("="):
+            operator = "="
+            value = value[1:]
+        else:
+            # Handle other comparison operators like >, <, >=, <=
+            comparison_operators = [op for op in config.get("operators", ["="]) if op not in [":", "="]]
+            for op in sorted(comparison_operators, key=len, reverse=True):
+                if value.startswith(op):
+                    operator = op
+                    value = value[len(op):]
+                    break
         
         # Handle quotes
         if value.startswith(('"', "'")) and value.endswith(value[0]):
