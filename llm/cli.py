@@ -62,6 +62,7 @@ from .utils import (
     schema_summary,
     token_usage_string,
     truncate_string,
+    FilterDSL,
 )
 import base64
 import httpx
@@ -1630,6 +1631,11 @@ order by prompt_attachments."order"
     is_flag=True,
     help="Expand fragments to show their content",
 )
+@click.option(
+    "--filter",
+    "filter_dsl",
+    help="Filter logs using DSL syntax like 'model:openai date:>2026-01'",
+)
 def logs_list(
     count,
     path,
@@ -1658,6 +1664,7 @@ def logs_list(
     id_gte,
     json_output,
     expand,
+    filter_dsl,
 ):
     "Show logged prompts and their responses"
     if database and not path:
@@ -1818,6 +1825,14 @@ def logs_list(
         schema_id = make_schema_id(schema)[0]
         where_bits.append("responses.schema_id = :schema_id")
         sql_params["schema_id"] = schema_id
+    
+    # Add DSL filters
+    if filter_dsl:
+        dsl_parser = FilterDSL(filter_dsl)
+        dsl_sql, dsl_params = dsl_parser.generate_sql()
+        if dsl_sql:
+            where_bits.append(dsl_sql)
+            sql_params.update(dsl_params)
 
     if where_bits:
         where_ = " and " if query else " where "

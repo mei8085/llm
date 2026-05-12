@@ -1078,3 +1078,273 @@ def test_logs_markdown_omits_reasoning_heading_when_empty(log_path):
     result = runner.invoke(cli, ["logs", "-p", str(log_path)], catch_exceptions=False)
     assert result.exit_code == 0
     assert "## Reasoning" not in result.output
+
+
+@pytest.mark.parametrize(
+    "filter_dsl,expected_models,description",
+    (
+        ("model:gpt-4", ["gpt-4"], "Exact model match"),
+        ("model:openai", ["openai-gpt-4", "openai-gpt-3.5"], "Partial model match"),
+        ("model:gpt-4 model:gpt-3.5", [], "Multiple model filters (AND)"),
+    ),
+)
+def test_logs_filter_model(user_path, filter_dsl, expected_models, description):
+    """Test model filtering with DSL."""
+    log_path = str(user_path / "logs_filter.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    start = datetime.datetime.now(datetime.timezone.utc)
+    
+    models = ["gpt-4", "gpt-3.5", "openai-gpt-4", "openai-gpt-3.5", "anthropic-claude"]
+    for i, model in enumerate(models):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": model,
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": f"conv_{i}",
+                "input_tokens": 10 + i,
+                "output_tokens": 20 + i,
+            }
+        )
+    
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", filter_dsl],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    actual_models = [log["model"] for log in logs]
+    assert actual_models == expected_models, f"Test failed: {description}"
+
+
+def test_logs_filter_date_exact(user_path):
+    """Test date filtering with exact month."""
+    log_path = str(user_path / "logs_filter_date.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    
+    # Create logs for different months
+    dates = [
+        "2026-01-15T10:00:00",
+        "2026-01-20T14:30:00",
+        "2026-02-01T08:00:00",
+        "2026-03-15T16:45:00",
+    ]
+    
+    for i, date in enumerate(dates):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": date,
+                "conversation_id": f"conv_{i}",
+            }
+        )
+    
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "date:2026-01"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 2
+    assert all(log["datetime_utc"].startswith("2026-01") for log in logs)
+
+
+@pytest.mark.parametrize(
+    "filter_dsl,expected_count,description",
+    (
+        ("date:>2026-01-01", 3, "Dates after 2026-01-01"),
+        ("date:>=2026-01-15", 3, "Dates on or after 2026-01-15"),
+        ("date:<2026-03-01", 3, "Dates before 2026-03-01"),
+        ("date:<=2026-02-01", 3, "Dates on or before 2026-02-01"),
+        ("date:>2026-01-01 date:<2026-03-01", 2, "Date range"),
+    ),
+)
+def test_logs_filter_date_range(user_path, filter_dsl, expected_count, description):
+    """Test date filtering with ranges."""
+    log_path = str(user_path / f"logs_filter_date_range_{expected_count}.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    
+    # Create logs for different dates
+    dates = [
+        "2026-01-01T10:00:00",
+        "2026-01-15T14:30:00",
+        "2026-02-01T08:00:00",
+        "2026-03-15T16:45:00",
+    ]
+    
+    for i, date in enumerate(dates):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": date,
+                "conversation_id": f"conv_{i}",
+            }
+        )
+    
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", filter_dsl],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == expected_count, f"Test failed: {description}"
+
+
+@pytest.mark.parametrize(
+    "filter_dsl,expected_count,description",
+    (
+        ("token_usage:>30", 2, "Total tokens > 30"),
+        ("token_usage:>=40", 1, "Total tokens >= 40"),
+        ("token_usage:<40", 2, "Total tokens < 40"),
+        ("token_usage:<=30", 1, "Total tokens <= 30"),
+        ("input_tokens:>15", 2, "Input tokens > 15"),
+        ("output_tokens:>20", 1, "Output tokens > 20"),
+    ),
+)
+def test_logs_filter_token_usage(user_path, filter_dsl, expected_count, description):
+    """Test token usage filtering."""
+    log_path = str(user_path / f"logs_filter_tokens_{expected_count}.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    start = datetime.datetime.now(datetime.timezone.utc)
+    
+    token_combinations = [
+        (10, 20),  # 30 total
+        (15, 25),  # 40 total
+        (20, 15),  # 35 total
+    ]
+    
+    for i, (input_tokens, output_tokens) in enumerate(token_combinations):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": f"conv_{i}",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        )
+    
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", filter_dsl],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == expected_count, f"Test failed: {description}"
+
+
+def test_logs_filter_conversation(user_path):
+    """Test conversation filtering with DSL."""
+    log_path = str(user_path / "logs_filter_conv.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    start = datetime.datetime.now(datetime.timezone.utc)
+    
+    # Create logs for different conversations
+    conversations = ["conv_abc", "conv_xyz", "conv_abc", "conv_123"]
+    
+    for i, conv in enumerate(conversations):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": (start + datetime.timedelta(seconds=i)).isoformat(),
+                "conversation_id": conv,
+            }
+        )
+    
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "conversation:conv_abc"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 2
+    assert all(log["conversation_id"] == "conv_abc" for log in logs)
+
+
+def test_logs_filter_combined(user_path):
+    """Test combining multiple filters with DSL."""
+    log_path = str(user_path / "logs_filter_combined.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    
+    # Create logs with different combinations
+    test_data = [
+        {"model": "gpt-4", "date": "2026-01-15T10:00:00", "conv": "conv_1"},
+        {"model": "gpt-4", "date": "2026-02-01T10:00:00", "conv": "conv_1"},
+        {"model": "gpt-3.5", "date": "2026-01-15T10:00:00", "conv": "conv_2"},
+        {"model": "gpt-4", "date": "2026-01-15T10:00:00", "conv": "conv_2"},
+    ]
+    
+    for i, data in enumerate(test_data):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": data["model"],
+                "datetime_utc": data["date"],
+                "conversation_id": data["conv"],
+            }
+        )
+    
+    # Test combining model and date filters
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", 
+         "--filter", "model:gpt-4 date:2026-01"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 2
+    assert all(log["model"] == "gpt-4" and log["datetime_utc"].startswith("2026-01") for log in logs)
+    
+    # Test combining model, date, and conversation
+    result2 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", 
+         "--filter", "model:gpt-4 date:2026-01 conversation:conv_1"],
+        catch_exceptions=False
+    )
+    assert result2.exit_code == 0
+    logs2 = json.loads(result2.output)
+    assert len(logs2) == 1
+    assert logs2[0]["model"] == "gpt-4"
+    assert logs2[0]["conversation_id"] == "conv_1"
+    assert logs2[0]["datetime_utc"].startswith("2026-01")

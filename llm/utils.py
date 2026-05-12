@@ -733,3 +733,167 @@ def _fresh(ms: int) -> bytes:
     timestamp = int.to_bytes(ms, TIMESTAMP_LEN, "big")
     randomness = os.urandom(RANDOMNESS_LEN)
     return timestamp + randomness
+
+
+class FilterDSL:
+    """
+    A simple DSL parser for filtering logs.
+    
+    Supports syntax like:
+    - model:openai
+    - model:openai model:gpt-4
+    - date:>2026-01-01
+    - date:<2026-02-01
+    - date:2026-01
+    - conversation:abc123
+    - token_usage:>100
+    """
+    
+    FILTER_TYPES = {
+        "model": {"column": "model", "operators": ["=", ":"]},
+        "date": {"column": "datetime_utc", "operators": ["=", ":", ">", "<", ">=", "<="]},
+        "conversation": {"column": "conversation_id", "operators": ["=", ":"]},
+        "token_usage": {"column": "(input_tokens + output_tokens)", "operators": [">", "<", ">=", "<=", "="]},
+        "input_tokens": {"column": "input_tokens", "operators": [">", "<", ">=", "<=", "="]},
+        "output_tokens": {"column": "output_tokens", "operators": [">", "<", ">=", "<=", "="]},
+    }
+    
+    def __init__(self, dsl_string: str):
+        self.dsl_string = dsl_string
+        self.filters = self._parse(dsl_string)
+    
+    @classmethod
+    def _parse(cls, dsl_string: str) -> List[Dict[str, Any]]:
+        filters = []
+        tokens = cls._tokenize(dsl_string)
+        
+        for token in tokens:
+            if not token:
+                continue
+            
+            filter_def = cls._parse_token(token)
+            if filter_def:
+                filters.append(filter_def)
+        
+        return filters
+    
+    @classmethod
+    def _tokenize(cls, dsl_string: str) -> List[str]:
+        tokens = []
+        buf = []
+        in_quotes = False
+        quote_char = ""
+        escape = False
+        
+        for ch in dsl_string:
+            if in_quotes:
+                buf.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote_char:
+                    in_quotes = False
+                    quote_char = ""
+            else:
+                if ch in "\"'":
+                    in_quotes = True
+                    quote_char = ch
+                    buf.append(ch)
+                elif ch.isspace():
+                    if buf:
+                        tokens.append("".join(buf))
+                        buf = []
+                else:
+                    buf.append(ch)
+        
+        if buf:
+            tokens.append("".join(buf))
+        
+        return tokens
+    
+    @classmethod
+    def _parse_token(cls, token: str) -> Optional[Dict[str, Any]]:
+        for filter_type, config in cls.FILTER_TYPES.items():
+            if token.startswith(f"{filter_type}:"):
+                value_part = token[len(filter_type) + 1:]
+                return cls._parse_filter_value(filter_type, value_part, config)
+        
+        return None
+    
+    @classmethod
+    def _parse_filter_value(
+        cls, 
+        filter_type: str, 
+        value_part: str, 
+        config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        value = value_part
+        operator = "="
+        
+        # Handle operators like >, <, >=, <=
+        for op in sorted(config.get("operators", ["="]), key=len, reverse=True):
+            if value.startswith(op):
+                operator = op
+                value = value[len(op):]
+                break
+        
+        # Handle quotes
+        if value.startswith(('"', "'")) and value.endswith(value[0]):
+            value = value[1:-1].replace(f"\\{value[0]}", value[0])
+        
+        # Handle date filtering - if it's just year-month, expand to range
+        if filter_type == "date":
+            if operator in ["=", ":"] and re.match(r"^\d{4}-\d{2}$", value):
+                return {
+                    "type": "date_range",
+                    "column": config["column"],
+                    "start": f"{value}-01",
+                    "end": f"{value}-02-01",
+                }
+        
+        return {
+            "type": filter_type,
+            "column": config["column"],
+            "operator": operator,
+            "value": value,
+        }
+    
+    def generate_sql(self, param_prefix: str = "dsl_") -> Tuple[str, Dict[str, Any]]:
+        sql_parts = []
+        params = {}
+        
+        for i, filter_def in enumerate(self.filters):
+            if filter_def["type"] == "date_range":
+                start_param = f"{param_prefix}date_start_{i}"
+                end_param = f"{param_prefix}date_end_{i}"
+                sql_parts.append(f"responses.{filter_def['column']} >= :{start_param}")
+                sql_parts.append(f"responses.{filter_def['column']} < :{end_param}")
+                params[start_param] = filter_def["start"]
+                params[end_param] = filter_def["end"]
+            else:
+                column = filter_def["column"]
+                operator = filter_def["operator"]
+                if operator == ":":
+                    operator = "="
+                
+                param_name = f"{param_prefix}{filter_def['type']}_{i}"
+                value = filter_def["value"]
+                
+                # Handle numeric comparisons for token_usage
+                if filter_def["type"] in ["token_usage", "input_tokens", "output_tokens"]:
+                    try:
+                        value = int(value)
+                    except ValueError:
+                        # Skip invalid numeric values
+                        continue
+                
+                # For model, allow partial match with :
+                if filter_def["type"] == "model" and filter_def["operator"] == ":":
+                    sql_parts.append(f"responses.{column} LIKE :{param_name}")
+                    params[param_name] = f"%{value}%"
+                else:
+                    sql_parts.append(f"responses.{column} {operator} :{param_name}")
+                    params[param_name] = value
+        
+        return " and ".join(sql_parts), params
