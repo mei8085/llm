@@ -2,8 +2,10 @@ from .models import EmbeddingModel
 from .embeddings_migrations import embeddings_migrations
 from dataclasses import dataclass
 import hashlib
+import math
 from itertools import islice
 import json
+import re
 from sqlite_utils import Database
 from sqlite_utils.db import Table
 import time
@@ -16,6 +18,69 @@ class Entry:
     score: Optional[float]
     content: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+def _tokenize(text: str) -> List[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+class BM25:
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.doc_freqs: Dict[str, int] = {}
+        self.doc_lengths: Dict[str, int] = {}
+        self.avgdl: float = 0.0
+        self.total_docs: int = 0
+        self.idf: Dict[str, float] = {}
+        self.doc_token_counts: Dict[str, Dict[str, int]] = {}
+        self._documents: Dict[str, str] = {}
+
+    def fit(self, documents: Dict[str, str]) -> None:
+        self._documents = documents
+        self.total_docs = len(documents)
+        total_length = 0
+        for doc_id, text in documents.items():
+            tokens = _tokenize(text)
+            self.doc_lengths[doc_id] = len(tokens)
+            total_length += len(tokens)
+            unique_tokens = set(tokens)
+            token_counts: Dict[str, int] = {}
+            for token in tokens:
+                token_counts[token] = token_counts.get(token, 0) + 1
+            self.doc_token_counts[doc_id] = token_counts
+            for token in unique_tokens:
+                self.doc_freqs[token] = self.doc_freqs.get(token, 0) + 1
+        if self.total_docs > 0:
+            self.avgdl = total_length / self.total_docs
+        for token, df in self.doc_freqs.items():
+            self.idf[token] = math.log(
+                1 + (self.total_docs - df + 0.5) / (df + 0.5)
+            )
+
+    def score(self, query: str, doc_id: str) -> float:
+        if doc_id not in self.doc_lengths:
+            return 0.0
+        query_tokens = _tokenize(query)
+        doc_len = self.doc_lengths[doc_id]
+        if doc_len == 0 or self.avgdl == 0:
+            return 0.0
+        score = 0.0
+        token_counts = self.doc_token_counts.get(doc_id, {})
+        for token in query_tokens:
+            if token not in self.idf:
+                continue
+            tf = token_counts.get(token, 0)
+            if tf == 0:
+                continue
+            idf = self.idf[token]
+            numerator = tf * (self.k1 + 1)
+            denominator = tf + self.k1 * (1 - self.b + self.b * (doc_len / self.avgdl))
+            score += idf * (numerator / denominator)
+        return score
+
+    def scores(self, query: str, doc_ids: List[str]) -> Dict[str, float]:
+        return {doc_id: self.score(query, doc_id) for doc_id in doc_ids}
 
 
 class Collection:
@@ -72,6 +137,7 @@ class Collection:
                     model = llm.get_embedding_model(model_id)
                     self._model = model
                 model_id = cast(EmbeddingModel, model).model_id
+                self.model_id = model_id
                 self.id = (
                     cast(Table, self.db["collections"])
                     .insert(
@@ -241,6 +307,10 @@ class Collection:
         number: int = 10,
         skip_id: Optional[str] = None,
         prefix: Optional[str] = None,
+        rerank: Optional[str] = None,
+        rerank_model: Optional[str] = None,
+        fetch_k: Optional[int] = None,
+        query_text: Optional[str] = None,
     ) -> List[Entry]:
         """
         Find similar items in the collection by a given vector.
@@ -249,12 +319,18 @@ class Collection:
             vector (list): Vector to search by
             number (int, optional): Number of similar items to return
             skip_id (str, optional): An ID to exclude from the results
-            prefix: (str, optional): Filter results to IDs witih this prefix
+            prefix: (str, optional): Filter results to IDs with this prefix
+            rerank: (str, optional): Rerank method: 'bm25' or 'embedding'
+            rerank_model: (str, optional): Embedding model for rerank (if rerank='embedding')
+            fetch_k: (int, optional): Number of candidates to fetch for reranking (default: number * 3)
+            query_text: (str, optional): Original query text for BM25 reranking
 
         Returns:
             list: List of Entry objects
         """
         import llm
+
+        fetch_count = fetch_k or (number * 3) if rerank else number
 
         def distance_score(other_encoded):
             other_vector = llm.decode(other_encoded)
@@ -273,7 +349,7 @@ class Collection:
             where_bits.append("id != ?")
             where_args.append(skip_id)
 
-        return [
+        results = [
             Entry(
                 id=row["id"],
                 score=row["score"],
@@ -288,14 +364,100 @@ class Collection:
             order by score desc limit {number}
         """.format(
                     where=" and ".join(where_bits),
-                    number=number,
+                    number=fetch_count,
                 ),
                 where_args,
             )
         ]
 
+        if not rerank:
+            return results[:number]
+
+        return self._rerank_results(
+            results,
+            rerank,
+            rerank_model,
+            query_text,
+            number,
+        )
+
+    def _rerank_results(
+        self,
+        candidates: List[Entry],
+        rerank: str,
+        rerank_model: Optional[str],
+        query_text: Optional[str],
+        number: int,
+    ) -> List[Entry]:
+        import llm
+
+        if not candidates:
+            return []
+
+        rerank = rerank.lower()
+
+        if rerank == "bm25":
+            if query_text is None:
+                raise ValueError("query_text is required for BM25 reranking")
+            documents: Dict[str, str] = {}
+            for entry in candidates:
+                if entry.content:
+                    documents[entry.id] = entry.content
+            if not documents:
+                raise ValueError(
+                    "BM25 reranking requires stored content. Use --store when embedding."
+                )
+            bm25 = BM25()
+            bm25.fit(documents)
+            scores = bm25.scores(query_text, list(documents.keys()))
+            reranked = [
+                (entry, scores.get(entry.id, 0.0)) for entry in candidates
+            ]
+            reranked.sort(key=lambda x: x[1], reverse=True)
+            return [
+                Entry(
+                    id=entry.id,
+                    score=score,
+                    content=entry.content,
+                    metadata=entry.metadata,
+                )
+                for entry, score in reranked[:number]
+            ]
+        elif rerank == "embedding":
+            if query_text is None:
+                raise ValueError("query_text is required for embedding reranking")
+            model_id = rerank_model or self.model_id
+            model = llm.get_embedding_model(model_id)
+            query_vector = model.embed(query_text)
+            reranked = []
+            for entry in candidates:
+                if entry.content is None:
+                    reranked.append((entry, entry.score or 0.0))
+                    continue
+                entry_vector = model.embed(entry.content)
+                score = llm.cosine_similarity(query_vector, entry_vector)
+                reranked.append((entry, score))
+            reranked.sort(key=lambda x: x[1], reverse=True)
+            return [
+                Entry(
+                    id=entry.id,
+                    score=score,
+                    content=entry.content,
+                    metadata=entry.metadata,
+                )
+                for entry, score in reranked[:number]
+            ]
+        else:
+            raise ValueError(f"Unknown rerank method: {rerank}")
+
     def similar_by_id(
-        self, id: str, number: int = 10, prefix: Optional[str] = None
+        self,
+        id: str,
+        number: int = 10,
+        prefix: Optional[str] = None,
+        rerank: Optional[str] = None,
+        rerank_model: Optional[str] = None,
+        fetch_k: Optional[int] = None,
     ) -> List[Entry]:
         """
         Find similar items in the collection by a given ID.
@@ -304,6 +466,9 @@ class Collection:
             id (str): ID to search by
             number (int, optional): Number of similar items to return
             prefix: (str, optional): Filter results to IDs with this prefix
+            rerank: (str, optional): Rerank method: 'bm25' or 'embedding'
+            rerank_model: (str, optional): Embedding model for rerank
+            fetch_k: (int, optional): Number of candidates to fetch for reranking
 
         Returns:
             list: List of Entry objects
@@ -317,14 +482,29 @@ class Collection:
         )
         if not matches:
             raise self.DoesNotExist("ID not found")
-        embedding = matches[0]["embedding"]
+        row = matches[0]
+        embedding = row["embedding"]
         comparison_vector = llm.decode(embedding)
+        query_text = row["content"]
         return self.similar_by_vector(
-            comparison_vector, number, skip_id=id, prefix=prefix
+            comparison_vector,
+            number,
+            skip_id=id,
+            prefix=prefix,
+            rerank=rerank,
+            rerank_model=rerank_model,
+            fetch_k=fetch_k,
+            query_text=query_text,
         )
 
     def similar(
-        self, value: Union[str, bytes], number: int = 10, prefix: Optional[str] = None
+        self,
+        value: Union[str, bytes],
+        number: int = 10,
+        prefix: Optional[str] = None,
+        rerank: Optional[str] = None,
+        rerank_model: Optional[str] = None,
+        fetch_k: Optional[int] = None,
     ) -> List[Entry]:
         """
         Find similar items in the collection by a given value.
@@ -333,12 +513,24 @@ class Collection:
             value (str or bytes): value to search by
             number (int, optional): Number of similar items to return
             prefix: (str, optional): Filter results to IDs with this prefix
+            rerank: (str, optional): Rerank method: 'bm25' or 'embedding'
+            rerank_model: (str, optional): Embedding model for rerank
+            fetch_k: (int, optional): Number of candidates to fetch for reranking
 
         Returns:
             list: List of Entry objects
         """
         comparison_vector = self.model().embed(value)
-        return self.similar_by_vector(comparison_vector, number, prefix=prefix)
+        query_text = value if isinstance(value, str) else None
+        return self.similar_by_vector(
+            comparison_vector,
+            number,
+            prefix=prefix,
+            rerank=rerank,
+            rerank_model=rerank_model,
+            fetch_k=fetch_k,
+            query_text=query_text,
+        )
 
     @classmethod
     def exists(cls, db: Database, name: str) -> bool:

@@ -713,3 +713,55 @@ def test_duplicate_content_embedded_only_once(embed_demo):
     # Should have only embedded one more thing
     assert db["embeddings"].count == 4
     assert len(embed_demo.embedded_content) == 4
+
+
+def test_similar_cli_bm25_rerank(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world how are you", store=True)
+    collection.embed("2", "goodbye world see you later", store=True)
+    collection.embed("3", "hello universe nice to meet", store=True)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--rerank", "bm25"])
+    assert result.exit_code == 0
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 3
+
+
+def test_similar_cli_bm25_rerank_no_store_error(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--rerank", "bm25"])
+    assert result.exit_code != 0
+    assert "stored content" in result.output.lower()
+
+
+def test_similar_cli_embedding_rerank(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--rerank", "embedding"])
+    assert result.exit_code == 0
+
+
+def test_similar_cli_rerank_fetch_k(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "document", "--rerank", "bm25", "--fetch-k", "5", "-n", "2"])
+    assert result.exit_code == 0

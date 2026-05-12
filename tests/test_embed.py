@@ -185,3 +185,67 @@ def test_binary_only_and_text_only_embedding_models():
         list(text_only.embed_multi([b"hello world"]))
 
     list(text_only.embed_multi(["hello world"]))
+
+
+def test_similar_bm25_rerank():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world how are you", store=True)
+    collection.embed("2", "goodbye world see you later", store=True)
+    collection.embed("3", "hello universe nice to meet", store=True)
+
+    results_no_rerank = collection.similar("hello")
+    assert len(results_no_rerank) == 3
+
+    results_bm25 = collection.similar("hello", rerank="bm25")
+    assert len(results_bm25) == 3
+    ids = [r.id for r in results_bm25]
+    assert ids[0] == "1"
+    assert ids[1] == "3"
+
+
+def test_similar_bm25_rerank_no_store_raises():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world")
+    with pytest.raises(ValueError) as excinfo:
+        collection.similar("hello", rerank="bm25")
+    assert "stored content" in str(excinfo.value).lower()
+
+
+def test_similar_embedding_rerank():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    collection.embed("3", "unrelated content here", store=True)
+
+    results = collection.similar("hello", rerank="embedding")
+    assert len(results) == 3
+    ids = [r.id for r in results]
+    assert "1" in ids
+    assert "2" in ids
+    assert "3" in ids
+
+
+def test_similar_by_id_bm25_rerank():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world how are you", store=True)
+    collection.embed("2", "goodbye world see you", store=True)
+    collection.embed("3", "hello universe nice to meet", store=True)
+
+    results = collection.similar_by_id("1", rerank="bm25")
+    assert len(results) == 2
+    ids = [r.id for r in results]
+    assert "3" in ids
+
+
+def test_similar_rerank_fetch_k():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+
+    results = collection.similar("document", rerank="bm25", fetch_k=5, number=2)
+    assert len(results) == 2

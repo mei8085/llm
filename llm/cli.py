@@ -3446,7 +3446,35 @@ def embed_multi(
     envvar="LLM_EMBEDDINGS_DB",
 )
 @click.option("--prefix", help="Just IDs with this prefix", default="")
-def similar(collection, id, input, content, binary, number, plain, database, prefix):
+@click.option(
+    "--rerank",
+    type=click.Choice(["bm25", "embedding"], case_sensitive=False),
+    help="Rerank results using this method (bm25 or embedding). "
+    "bm25 requires stored content.",
+)
+@click.option(
+    "--rerank-model",
+    help="Embedding model to use for reranking (only used with --rerank embedding)",
+)
+@click.option(
+    "--fetch-k",
+    type=int,
+    help="Number of candidates to fetch for reranking (default: number * 3)",
+)
+def similar(
+    collection,
+    id,
+    input,
+    content,
+    binary,
+    number,
+    plain,
+    database,
+    prefix,
+    rerank,
+    rerank_model,
+    fetch_k,
+):
     """
     Return top N similar IDs from a collection using cosine similarity.
 
@@ -3478,9 +3506,18 @@ def similar(collection, id, input, content, binary, number, plain, database, pre
 
     if id:
         try:
-            results = collection_obj.similar_by_id(id, number, prefix=prefix)
+            results = collection_obj.similar_by_id(
+                id,
+                number,
+                prefix=prefix,
+                rerank=rerank,
+                rerank_model=rerank_model,
+                fetch_k=fetch_k,
+            )
         except Collection.DoesNotExist:
             raise click.ClickException("ID not found in collection")
+        except ValueError as ex:
+            raise click.ClickException(str(ex))
     else:
         # Resolve input text
         if not content:
@@ -3494,7 +3531,17 @@ def similar(collection, id, input, content, binary, number, plain, database, pre
                     content = f.read()
         if not content:
             raise click.ClickException("No content provided")
-        results = collection_obj.similar(content, number, prefix=prefix)
+        try:
+            results = collection_obj.similar(
+                content,
+                number,
+                prefix=prefix,
+                rerank=rerank,
+                rerank_model=rerank_model,
+                fetch_k=fetch_k,
+            )
+        except ValueError as ex:
+            raise click.ClickException(str(ex))
 
     for result in results:
         if plain:
