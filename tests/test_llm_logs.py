@@ -1220,11 +1220,11 @@ def test_logs_filter_date_december_boundary(user_path):
 @pytest.mark.parametrize(
     "filter_dsl,expected_count,description",
     (
-        ("date:>2026-01-01", 3, "Dates after 2026-01-01"),
-        ("date:>=2026-01-15", 3, "Dates on or after 2026-01-15"),
-        ("date:<2026-03-01", 3, "Dates before 2026-03-01"),
-        ("date:<=2026-02-01", 3, "Dates on or before 2026-02-01"),
-        ("date:>2026-01-01 date:<2026-03-01", 2, "Date range"),
+        ("date:>2026-01-01T10:00:00", 3, "Dates after 2026-01-01 10:00:00"),
+        ("date:>=2026-01-15T14:30:00", 3, "Dates on or after 2026-01-15 14:30:00"),
+        ("date:<2026-03-15T16:45:00", 3, "Dates before 2026-03-15 16:45:00"),
+        ("date:<=2026-02-01T08:00:00", 3, "Dates on or before 2026-02-01 08:00:00"),
+        ("date:>2026-01-01T10:00:00 date:<2026-03-15T16:45:00", 2, "Date range"),
     ),
 )
 def test_logs_filter_date_range(user_path, filter_dsl, expected_count, description):
@@ -1233,7 +1233,7 @@ def test_logs_filter_date_range(user_path, filter_dsl, expected_count, descripti
     db = sqlite_utils.Database(log_path)
     migrate(db)
     
-    # Create logs for different dates
+    # Create logs for different dates with exact timestamps
     dates = [
         "2026-01-01T10:00:00",
         "2026-01-15T14:30:00",
