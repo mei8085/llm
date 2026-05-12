@@ -1832,10 +1832,12 @@ class Response(_BaseResponse):
             # Check for retry decorator or retry config
             max_retries = getattr(tool, "max_retries", 0)
             retry_delay = getattr(tool, "retry_delay", 0)
+            retry_count = 0
 
             while retry_number <= max_retries:
                 attachments = []
                 exception = None
+                current_try = retry_number
 
                 try:
                     if inspect.iscoroutinefunction(tool.implementation):
@@ -1849,6 +1851,18 @@ class Response(_BaseResponse):
 
                     if not isinstance(result, str):
                         result = json.dumps(result, default=repr)
+                    # Record successful trace
+                    tool_traces.append(
+                        {
+                            "arguments": tool_call.arguments,
+                            "error": "",
+                            "error_type": "",
+                            "retry_number": current_try,
+                            "timestamp_utc": datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).isoformat(),
+                        }
+                    )
                     break
                 except Exception as ex:
                     exception = ex
@@ -1858,7 +1872,7 @@ class Response(_BaseResponse):
                             "arguments": tool_call.arguments,
                             "error": error_str,
                             "error_type": ex.__class__.__name__,
-                            "retry_number": retry_number,
+                            "retry_number": current_try,
                             "timestamp_utc": datetime.datetime.now(
                                 datetime.timezone.utc
                             ).isoformat(),
@@ -2240,6 +2254,7 @@ class AsyncResponse(_BaseResponse):
                     while retry_number <= max_retries:
                         exception = None
                         attachments = []
+                        current_try = retry_number
                         try:
                             res = await tool.implementation(**tc.arguments)
                             if isinstance(res, ToolOutput):
@@ -2250,6 +2265,18 @@ class AsyncResponse(_BaseResponse):
                                 if isinstance(res, str)
                                 else json.dumps(res, default=repr)
                             )
+                            # Record successful trace
+                            tool_traces.append(
+                                {
+                                    "arguments": tc.arguments,
+                                    "error": "",
+                                    "error_type": "",
+                                    "retry_number": current_try,
+                                    "timestamp_utc": datetime.datetime.now(
+                                        datetime.timezone.utc
+                                    ).isoformat(),
+                                }
+                            )
                             break
                         except Exception as ex:
                             exception = ex
@@ -2259,7 +2286,7 @@ class AsyncResponse(_BaseResponse):
                                     "arguments": tc.arguments,
                                     "error": error_str,
                                     "error_type": ex.__class__.__name__,
-                                    "retry_number": retry_number,
+                                    "retry_number": current_try,
                                     "timestamp_utc": datetime.datetime.now(
                                         datetime.timezone.utc
                                     ).isoformat(),
@@ -2342,6 +2369,7 @@ class AsyncResponse(_BaseResponse):
                 while retry_number <= max_retries:
                     exception = None
                     attachments = []
+                    current_try = retry_number
                     try:
                         res = tool.implementation(**tc.arguments)
                         if inspect.isawaitable(res):
@@ -2354,6 +2382,18 @@ class AsyncResponse(_BaseResponse):
                             if isinstance(res, str)
                             else json.dumps(res, default=repr)
                         )
+                        # Record successful trace
+                        tool_traces.append(
+                            {
+                                "arguments": tc.arguments,
+                                "error": "",
+                                "error_type": "",
+                                "retry_number": current_try,
+                                "timestamp_utc": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ).isoformat(),
+                            }
+                        )
                         break
                     except Exception as ex:
                         exception = ex
@@ -2363,7 +2403,7 @@ class AsyncResponse(_BaseResponse):
                                 "arguments": tc.arguments,
                                 "error": error_str,
                                 "error_type": ex.__class__.__name__,
-                                "retry_number": retry_number,
+                                "retry_number": current_try,
                                 "timestamp_utc": datetime.datetime.now(
                                     datetime.timezone.utc
                                 ).isoformat(),
