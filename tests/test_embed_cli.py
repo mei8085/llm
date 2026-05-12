@@ -816,3 +816,44 @@ def test_similar_cli_rerank_fetch_k_equal_to_number(user_path):
     result = runner.invoke(
         cli, ["similar", "demo", "-c", "document", "--rerank", "bm25", "--fetch-k", "5", "-n", "5"])
     assert result.exit_code == 0
+
+
+def test_similar_cli_fetch_k_without_rerank_warning(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--fetch-k", "10"])
+    assert result.exit_code == 0
+    assert "--fetch-k has no effect without --rerank" in result.stderr
+
+
+def test_similar_cli_fetch_k_zero_without_rerank_warning(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--fetch-k", "0"])
+    assert result.exit_code == 0
+    assert "--fetch-k has no effect without --rerank" in result.stderr
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 2
+
+
+def test_similar_cli_fetch_k_by_id_without_rerank_warning(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(
+        cli, ["similar", "demo", "1", "--fetch-k", "10"])
+    assert result.exit_code == 0
+    assert "--fetch-k has no effect without --rerank" in result.stderr

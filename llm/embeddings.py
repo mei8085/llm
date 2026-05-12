@@ -330,7 +330,7 @@ class Collection:
         """
         import llm
 
-        if fetch_k is not None:
+        if rerank and fetch_k is not None:
             if fetch_k <= 0:
                 raise ValueError("fetch_k must be a positive integer greater than 0")
             if fetch_k < number:

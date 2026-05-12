@@ -300,3 +300,37 @@ def test_similar_by_id_rerank_fetch_k_validation():
     with pytest.raises(ValueError) as excinfo:
         collection.similar_by_id("1", rerank="bm25", fetch_k=0)
     assert "fetch_k must be a positive integer greater than 0" in str(excinfo.value)
+
+
+def test_similar_fetch_k_without_rerank_ignored():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    results = collection.similar("hello", fetch_k=0)
+    assert len(results) == 2
+    ids = [r.id for r in results]
+    assert "1" in ids
+    assert "2" in ids
+
+
+def test_similar_fetch_k_negative_without_rerank_ignored():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    results = collection.similar("hello", fetch_k=-1)
+    assert len(results) == 2
+    ids = [r.id for r in results]
+    assert "1" in ids
+    assert "2" in ids
+
+
+def test_similar_by_id_fetch_k_without_rerank_ignored():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    results = collection.similar_by_id("1", fetch_k=0)
+    assert len(results) == 1
+    assert results[0].id == "2"

@@ -3491,6 +3491,15 @@ def similar(
     if not id and not content and not input:
         raise click.ClickException("Must provide content or an ID for the comparison")
 
+    if fetch_k is not None and not rerank:
+        click.echo(
+            click.style(
+                "Warning: --fetch-k has no effect without --rerank. Ignoring.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+
     if database:
         db = sqlite_utils.Database(database)
     else:
