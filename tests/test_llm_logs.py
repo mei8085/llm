@@ -1083,13 +1083,17 @@ def test_logs_markdown_omits_reasoning_heading_when_empty(log_path):
 @pytest.mark.parametrize(
     "filter_dsl,expected_models,description",
     (
-        ("model:gpt-4", ["gpt-4"], "Exact model match"),
-        ("model:openai", ["openai-gpt-4", "openai-gpt-3.5"], "Partial model match"),
+        ("model:gpt-4", ["gpt-4", "openai-gpt-4"], "Partial match for gpt-4"),
+        ("model:openai", ["openai-gpt-4", "openai-gpt-3.5"], "Partial match for openai"),
+        ("model:anthropic", ["anthropic-claude"], "Partial match for anthropic"),
         ("model:gpt-4 model:gpt-3.5", [], "Multiple model filters (AND)"),
     ),
 )
 def test_logs_filter_model(user_path, filter_dsl, expected_models, description):
-    """Test model filtering with DSL."""
+    """Test model filtering with DSL.
+    
+    All model:value filters use fuzzy matching (LIKE %value%).
+    """
     log_path = str(user_path / "logs_filter.db")
     db = sqlite_utils.Database(log_path)
     migrate(db)
@@ -1268,7 +1272,8 @@ def test_logs_filter_date_range(user_path, filter_dsl, expected_count, descripti
         ("token_usage:>=40", 1, "Total tokens >= 40"),
         ("token_usage:<40", 2, "Total tokens < 40"),
         ("token_usage:<=30", 1, "Total tokens <= 30"),
-        ("input_tokens:>15", 2, "Input tokens > 15"),
+        ("input_tokens:>15", 1, "Input tokens > 15"),
+        ("input_tokens:>=15", 2, "Input tokens >= 15"),
         ("output_tokens:>20", 1, "Output tokens > 20"),
     ),
 )

@@ -829,10 +829,14 @@ class FilterDSL:
         config: Dict[str, Any]
     ) -> Dict[str, Any]:
         value = value_part
-        operator = "="
+        
+        # Default operator is ":" (the one in the token like model:openai)
+        # This triggers fuzzy matching for model and date:YYYY-MM
+        operator = ":"
         
         # Handle operators like >, <, >=, <=
-        for op in sorted(config.get("operators", ["="]), key=len, reverse=True):
+        comparison_operators = [op for op in config.get("operators", ["="]) if op not in [":", "="]]
+        for op in sorted(comparison_operators, key=len, reverse=True):
             if value.startswith(op):
                 operator = op
                 value = value[len(op):]
@@ -894,15 +898,20 @@ class FilterDSL:
                     try:
                         value = int(value)
                     except ValueError:
-                        # Skip invalid numeric values
                         continue
+                
+                # Build the SQL column/expression
+                if filter_def["type"] == "token_usage":
+                    sql_column = "(responses.input_tokens + responses.output_tokens)"
+                else:
+                    sql_column = f"responses.{column}"
                 
                 # For model, allow partial match with :
                 if filter_def["type"] == "model" and filter_def["operator"] == ":":
-                    sql_parts.append(f"responses.{column} LIKE :{param_name}")
+                    sql_parts.append(f"{sql_column} LIKE :{param_name}")
                     params[param_name] = f"%{value}%"
                 else:
-                    sql_parts.append(f"responses.{column} {operator} :{param_name}")
+                    sql_parts.append(f"{sql_column} {operator} :{param_name}")
                     params[param_name] = value
         
         return " and ".join(sql_parts), params
