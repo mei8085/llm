@@ -330,6 +330,14 @@ class Collection:
         """
         import llm
 
+        if fetch_k is not None:
+            if fetch_k <= 0:
+                raise ValueError("fetch_k must be a positive integer greater than 0")
+            if fetch_k < number:
+                raise ValueError(
+                    f"fetch_k ({fetch_k}) must be greater than or equal to number ({number})"
+                )
+
         fetch_count = fetch_k or (number * 3) if rerank else number
 
         def distance_score(other_encoded):

@@ -765,3 +765,54 @@ def test_similar_cli_rerank_fetch_k(user_path):
     result = runner.invoke(
         cli, ["similar", "demo", "-c", "document", "--rerank", "bm25", "--fetch-k", "5", "-n", "2"])
     assert result.exit_code == 0
+
+
+def test_similar_cli_rerank_fetch_k_zero(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--rerank", "bm25", "--fetch-k", "0"])
+    assert result.exit_code != 0
+    assert "fetch_k must be a positive integer greater than 0" in result.output
+
+
+def test_similar_cli_rerank_fetch_k_negative(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "hello", "--rerank", "bm25", "--fetch-k", "-1"])
+    assert result.exit_code != 0
+    assert "fetch_k must be a positive integer greater than 0" in result.output
+
+
+def test_similar_cli_rerank_fetch_k_less_than_number(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "document", "--rerank", "bm25", "--fetch-k", "3", "-n", "5"])
+    assert result.exit_code != 0
+    assert "fetch_k (3) must be greater than or equal to number (5)" in result.output
+
+
+def test_similar_cli_rerank_fetch_k_equal_to_number(user_path):
+    path = str(user_path / "embeddings.db")
+    db = sqlite_utils.Database(path)
+    collection = Collection("demo", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["similar", "demo", "-c", "document", "--rerank", "bm25", "--fetch-k", "5", "-n", "5"])
+    assert result.exit_code == 0

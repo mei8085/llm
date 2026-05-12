@@ -249,3 +249,54 @@ def test_similar_rerank_fetch_k():
 
     results = collection.similar("document", rerank="bm25", fetch_k=5, number=2)
     assert len(results) == 2
+
+
+def test_similar_rerank_fetch_k_zero():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    with pytest.raises(ValueError) as excinfo:
+        collection.similar("hello", rerank="bm25", fetch_k=0)
+    assert "fetch_k must be a positive integer greater than 0" in str(excinfo.value)
+
+
+def test_similar_rerank_fetch_k_negative():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    with pytest.raises(ValueError) as excinfo:
+        collection.similar("hello", rerank="bm25", fetch_k=-1)
+    assert "fetch_k must be a positive integer greater than 0" in str(excinfo.value)
+
+
+def test_similar_rerank_fetch_k_less_than_number():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+    with pytest.raises(ValueError) as excinfo:
+        collection.similar("document", rerank="bm25", fetch_k=3, number=5)
+    assert "fetch_k (3) must be greater than or equal to number (5)" in str(
+        excinfo.value
+    )
+
+
+def test_similar_rerank_fetch_k_equal_to_number():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    for i in range(10):
+        collection.embed(str(i), f"document {i}", store=True)
+    results = collection.similar("document", rerank="bm25", fetch_k=5, number=5)
+    assert len(results) == 5
+
+
+def test_similar_by_id_rerank_fetch_k_validation():
+    db = sqlite_utils.Database(memory=True)
+    collection = llm.Collection("test", db, model_id="embed-demo")
+    collection.embed("1", "hello world", store=True)
+    collection.embed("2", "goodbye world", store=True)
+    with pytest.raises(ValueError) as excinfo:
+        collection.similar_by_id("1", rerank="bm25", fetch_k=0)
+    assert "fetch_k must be a positive integer greater than 0" in str(excinfo.value)
