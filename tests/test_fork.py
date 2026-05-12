@@ -268,3 +268,312 @@ def test_logs_markdown_includes_fork_info(user_path):
 
     assert "forked from response:" in output
     assert response1_id in output
+
+
+def test_load_conversation_from_response(user_path):
+    from llm.cli import load_conversation_from_response
+
+    log_path = str(user_path / "fork_from_db.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    conv1_id = "conv1"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original", "model": "echo"},
+        ]
+    )
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+    response1_id = str(monotonic_ulid()).lower()
+    response2_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "echo",
+                "prompt": "first",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "FIRST",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response2_id,
+                "model": "echo",
+                "prompt": "second",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "SECOND",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=1)).isoformat(),
+                "parent_response_id": None,
+            },
+        ]
+    )
+
+    forked = load_conversation_from_response(response1_id, database=log_path)
+
+    assert forked.id != conv1_id
+    assert forked.parent_response_id == response1_id
+    assert len(forked.responses) == 1
+    assert forked.responses[0].id == response1_id
+
+
+def test_cli_fork_option(user_path):
+    log_path = str(user_path / "cli_fork.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    conv1_id = "conv1"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original", "model": "echo"},
+        ]
+    )
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+    response1_id = str(monotonic_ulid()).lower()
+    response2_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "echo",
+                "prompt": "first",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "FIRST",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response2_id,
+                "model": "echo",
+                "prompt": "second",
+                "system": None,
+                "prompt_json": "null",
+                "options_json": "{}",
+                "response": "SECOND",
+                "response_json": "null",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=1)).isoformat(),
+                "parent_response_id": None,
+            },
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["prompt", "--fork", response1_id, "-d", log_path, "-m", "echo", "forked prompt"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    forked_responses = list(
+        db["responses"].rows_where("parent_response_id = ?", [response1_id])
+    )
+    assert len(forked_responses) == 1
+    assert forked_responses[0]["prompt"] == "forked prompt"
+
+
+def test_cli_fork_with_continue_raises_error(user_path):
+    log_path = str(user_path / "fork_error.db")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--fork", "some-id", "-c", "hello"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--fork cannot be used with" in str(result.output)
+
+
+def test_logs_json_includes_parent_conversation(user_path):
+    log_path = str(user_path / "logs_parent_conv_json.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+
+    conv1_id = "conv1"
+    conv2_id = "conv2"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original", "model": "davinci"},
+            {"id": conv2_id, "name": "Forked", "model": "davinci"},
+        ]
+    )
+
+    response1_id = str(monotonic_ulid()).lower()
+    response3_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "davinci",
+                "prompt": "hello",
+                "response": "Hello!",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response3_id,
+                "model": "davinci",
+                "prompt": "different question",
+                "response": "Forked answer",
+                "conversation_id": conv2_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=2)).isoformat(),
+                "parent_response_id": response1_id,
+            },
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["logs", "-p", log_path, "--json", "-n", "2"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+
+    response3 = None
+    for log in logs:
+        if log["id"] == response3_id:
+            response3 = log
+            break
+
+    assert response3 is not None
+    assert response3["parent_response_id"] == response1_id
+    assert response3["parent_conversation_id"] == conv1_id
+    assert response3["parent_conversation_name"] == "Original"
+
+
+def test_logs_short_includes_parent_conversation(user_path):
+    log_path = str(user_path / "logs_parent_conv_short.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+
+    conv1_id = "conv1"
+    conv2_id = "conv2"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original", "model": "davinci"},
+            {"id": conv2_id, "name": "Forked", "model": "davinci"},
+        ]
+    )
+
+    response1_id = str(monotonic_ulid()).lower()
+    response3_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "davinci",
+                "prompt": "hello",
+                "response": "Hello!",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response3_id,
+                "model": "davinci",
+                "prompt": "different question",
+                "response": "Forked answer",
+                "conversation_id": conv2_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=2)).isoformat(),
+                "parent_response_id": response1_id,
+            },
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["logs", "-p", log_path, "-s", "-n", "2"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    output = result.output
+
+    assert f"parent_response: {response1_id}" in output
+    assert "parent_conversation:" in output
+    assert "Original" in output
+    assert conv1_id in output
+
+
+def test_logs_markdown_includes_parent_conversation(user_path):
+    log_path = str(user_path / "logs_parent_conv_md.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    start = datetime.datetime.now(datetime.timezone.utc)
+
+    conv1_id = "conv1"
+    conv2_id = "conv2"
+
+    db["conversations"].insert_all(
+        [
+            {"id": conv1_id, "name": "Original", "model": "davinci"},
+            {"id": conv2_id, "name": "Forked", "model": "davinci"},
+        ]
+    )
+
+    response1_id = str(monotonic_ulid()).lower()
+    response3_id = str(monotonic_ulid()).lower()
+
+    db["responses"].insert_all(
+        [
+            {
+                "id": response1_id,
+                "model": "davinci",
+                "prompt": "hello",
+                "response": "Hello!",
+                "conversation_id": conv1_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=0)).isoformat(),
+                "parent_response_id": None,
+            },
+            {
+                "id": response3_id,
+                "model": "davinci",
+                "prompt": "different question",
+                "response": "Forked answer",
+                "conversation_id": conv2_id,
+                "datetime_utc": (start + datetime.timedelta(seconds=2)).isoformat(),
+                "parent_response_id": response1_id,
+            },
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["logs", "-p", log_path, "-n", "2"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    output = result.output
+
+    assert "forked from response:" in output
+    assert response1_id in output
+    assert "from conversation" in output
+    assert "Original" in output
+    assert conv1_id in output

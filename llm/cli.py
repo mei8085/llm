@@ -500,6 +500,11 @@ def cli():
     "--conversation",
     help="Continue the conversation with the given ID.",
 )
+@click.option(
+    "fork_response_id",
+    "--fork",
+    help="Fork a new conversation from the response with this ID.",
+)
 @click.option("--key", help="API key to use")
 @click.option("--save", help="Save prompt with this template name")
 @click.option("async_", "--async", is_flag=True, help="Run prompt asynchronously")
@@ -538,6 +543,7 @@ def prompt(
     no_reasoning,
     _continue,
     conversation_id,
+    fork_response_id,
     key,
     save,
     async_,
@@ -636,6 +642,7 @@ def prompt(
             ("--template", template),
             ("--continue", _continue),
             ("--cid", conversation_id),
+            ("--fork", fork_response_id),
         ):
             if var:
                 disallowed_options.append(option)
@@ -767,7 +774,18 @@ def prompt(
         no_stream = True
 
     conversation = None
-    if conversation_id or _continue:
+    if fork_response_id:
+        if _continue or conversation_id:
+            raise click.ClickException(
+                "--fork cannot be used with --continue or --cid"
+            )
+        try:
+            conversation = load_conversation_from_response(
+                fork_response_id, async_=async_, database=database
+            )
+        except UnknownModelError as ex:
+            raise click.ClickException(str(ex))
+    elif conversation_id or _continue:
         # Load the conversation - loads most recent if no ID provided
         try:
             conversation = load_conversation(
@@ -985,6 +1003,11 @@ def prompt(
     help="Continue the conversation with the given ID.",
 )
 @click.option(
+    "fork_response_id",
+    "--fork",
+    help="Fork a new conversation from the response with this ID.",
+)
+@click.option(
     "fragments",
     "-f",
     "--fragment",
@@ -1066,6 +1089,7 @@ def chat(
     model_id,
     _continue,
     conversation_id,
+    fork_response_id,
     fragments,
     system_fragments,
     template,
@@ -1097,7 +1121,18 @@ def chat(
     migrate(db)
 
     conversation = None
-    if conversation_id or _continue:
+    if fork_response_id:
+        if _continue or conversation_id:
+            raise click.ClickException(
+                "--fork cannot be used with --continue or --cid"
+            )
+        try:
+            conversation = load_conversation_from_response(
+                fork_response_id, database=database
+            )
+        except UnknownModelError as ex:
+            raise click.ClickException(str(ex))
+    elif conversation_id or _continue:
         # Load the conversation - loads most recent if no ID provided
         try:
             conversation = load_conversation(conversation_id, database=database)
@@ -1329,6 +1364,79 @@ def load_conversation(
     return conversation
 
 
+def load_conversation_from_response(
+    response_id: str,
+    async_=False,
+    database=None,
+) -> _BaseConversation:
+    """
+    Load a conversation up to and including a specific response, then fork a new
+    conversation from that point.
+
+    This is used for the --fork option, allowing users to branch off from any
+    historical response rather than continuing from the end of a conversation.
+    """
+    log_path = pathlib.Path(database) if database else logs_db_path()
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
+    # Get the response to fork from
+    try:
+        response_row = cast(sqlite_utils.db.Table, db["responses"]).get(response_id)
+    except sqlite_utils.db.NotFoundError:
+        raise click.ClickException(
+            "No response found with id={}".format(response_id)
+        )
+
+    # Get the conversation this response belongs to
+    conversation_id = response_row["conversation_id"]
+    try:
+        conv_row = cast(sqlite_utils.db.Table, db["conversations"]).get(conversation_id)
+    except sqlite_utils.db.NotFoundError:
+        raise click.ClickException(
+            "No conversation found with id={}".format(conversation_id)
+        )
+
+    conversation_class = AsyncConversation if async_ else Conversation
+    response_class = AsyncResponse if async_ else Response
+
+    # Load all responses up to and including the fork point
+    conversation = conversation_class.from_row(conv_row)
+    all_responses = list(
+        db["responses"].rows_where(
+            "conversation_id = ?", [conversation_id], order_by="id"
+        )
+    )
+
+    # Find the fork point and load responses up to that point
+    fork_index = None
+    for i, r in enumerate(all_responses):
+        if r["id"] == response_id:
+            fork_index = i
+            break
+
+    if fork_index is None:
+        raise click.ClickException(
+            "Response {} not found in conversation {}".format(response_id, conversation_id)
+        )
+
+    for i, response in enumerate(all_responses[: fork_index + 1]):
+        response_obj = response_class.from_row(db, response)
+        if conversation.responses:
+            previous_response = conversation.responses[-1]
+            response_obj.prompt._explicit_messages = (
+                list(previous_response.prompt.messages)
+                + list(previous_response._messages_now())
+                + list(response_obj.prompt.messages)
+            )
+        conversation.responses.append(response_obj)
+
+    # Now fork the conversation to create a new branch
+    last_response = conversation.responses[-1]
+    forked_conversation = conversation.fork(last_response)
+    return forked_conversation
+
+
 @cli.group(
     cls=DefaultGroup,
     default="list",
@@ -1491,7 +1599,9 @@ LOGS_COLUMNS = """    responses.id,
     responses.token_details,
     conversations.name as conversation_name,
     conversations.model as conversation_model,
-    schemas.content as schema_json"""
+    schemas.content as schema_json,
+    parent_responses.conversation_id as parent_conversation_id,
+    parent_conversations.name as parent_conversation_name"""
 
 LOGS_SQL = """
 select
@@ -1499,7 +1609,9 @@ select
 from
     responses
 left join schemas on responses.schema_id = schemas.id
-left join conversations on responses.conversation_id = conversations.id{extra_where}
+left join conversations on responses.conversation_id = conversations.id
+left join responses as parent_responses on responses.parent_response_id = parent_responses.id
+left join conversations as parent_conversations on parent_responses.conversation_id = parent_conversations.id{extra_where}
 order by {order_by}{limit}
 """
 LOGS_SQL_SEARCH = """
@@ -1509,6 +1621,8 @@ from
     responses
 left join schemas on responses.schema_id = schemas.id
 left join conversations on responses.conversation_id = conversations.id
+left join responses as parent_responses on responses.parent_response_id = parent_responses.id
+left join conversations as parent_conversations on parent_responses.conversation_id = parent_conversations.id
 join responses_fts on responses_fts.rowid = responses.rowid
 where responses_fts match :query{extra_where}
 order by {order_by}{limit}
@@ -2067,6 +2181,13 @@ def logs_list(
                 }
                 if row["parent_response_id"]:
                     obj["parent_response"] = row["parent_response_id"]
+                    if row["parent_conversation_id"]:
+                        parent_info = row["parent_conversation_id"]
+                        if row["parent_conversation_name"]:
+                            parent_info = "{} ({})".format(
+                                row["parent_conversation_name"], parent_info
+                            )
+                        obj["parent_conversation"] = parent_info
                 if row["tool_calls"]:
                     obj["tool_calls"] = [
                         "{}({})".format(
@@ -2110,9 +2231,17 @@ def logs_list(
             # Not short, output Markdown
             fork_info = ""
             if row["parent_response_id"]:
-                fork_info = "    (forked from response: {})".format(
-                    row["parent_response_id"]
-                )
+                parent_details = row["parent_response_id"]
+                if row["parent_conversation_id"]:
+                    parent_conversation_info = row["parent_conversation_id"]
+                    if row["parent_conversation_name"]:
+                        parent_conversation_info = "{} ({})".format(
+                            row["parent_conversation_name"], parent_conversation_info
+                        )
+                    parent_details = "{} from conversation {}".format(
+                        parent_details, parent_conversation_info
+                    )
+                fork_info = "    (forked from response: {})".format(parent_details)
             click.echo(
                 "# {}{}{}\n{}".format(
                     row["datetime_utc"].split(".")[0],
