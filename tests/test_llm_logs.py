@@ -1162,6 +1162,57 @@ def test_logs_filter_date_exact(user_path):
     assert all(log["datetime_utc"].startswith("2026-01") for log in logs)
 
 
+def test_logs_filter_date_december_boundary(user_path):
+    """Test date filtering for December (year boundary)."""
+    log_path = str(user_path / "logs_filter_date_dec.db")
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+    
+    # Create logs for December 2026 and January 2027
+    dates = [
+        "2026-12-01T10:00:00",
+        "2026-12-15T14:30:00",
+        "2026-12-31T23:59:59",
+        "2027-01-01T00:00:00",
+    ]
+    
+    for i, date in enumerate(dates):
+        db["responses"].insert(
+            {
+                "id": str(monotonic_ulid()).lower(),
+                "system": "system",
+                "prompt": f"prompt {i}",
+                "response": f"response {i}",
+                "model": "gpt-4",
+                "datetime_utc": date,
+                "conversation_id": f"conv_{i}",
+            }
+        )
+    
+    runner = CliRunner()
+    # Test December 2026 - should include all 3 December entries, but not January 2027
+    result = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "date:2026-12"],
+        catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    logs = json.loads(result.output)
+    assert len(logs) == 3
+    assert all(log["datetime_utc"].startswith("2026-12") for log in logs)
+    
+    # Test January 2027 - should include only the January entry
+    result2 = runner.invoke(
+        cli, 
+        ["logs", "list", "-p", log_path, "-n", "0", "--json", "--filter", "date:2027-01"],
+        catch_exceptions=False
+    )
+    assert result2.exit_code == 0
+    logs2 = json.loads(result2.output)
+    assert len(logs2) == 1
+    assert logs2[0]["datetime_utc"].startswith("2027-01")
+
+
 @pytest.mark.parametrize(
     "filter_dsl,expected_count,description",
     (

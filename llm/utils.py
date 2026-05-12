@@ -845,11 +845,20 @@ class FilterDSL:
         # Handle date filtering - if it's just year-month, expand to range
         if filter_type == "date":
             if operator in ["=", ":"] and re.match(r"^\d{4}-\d{2}$", value):
+                # Calculate next month's first day
+                year, month = map(int, value.split("-"))
+                if month == 12:
+                    next_year = year + 1
+                    next_month = 1
+                else:
+                    next_year = year
+                    next_month = month + 1
+                end_date = f"{next_year:04d}-{next_month:02d}-01"
                 return {
                     "type": "date_range",
                     "column": config["column"],
                     "start": f"{value}-01",
-                    "end": f"{value}-02-01",
+                    "end": end_date,
                 }
         
         return {
